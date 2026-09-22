@@ -115,9 +115,8 @@
       case 'get_screenshot': return getScreenshot(input);
       case 'export_asset': return exportAsset(input);
       case 'find_related_frames': return findRelatedFrames(input);
-      case 'get_coding_context': return getCodingContext(input);
+      case 'scan_design': return scanDesign(input);
       case 'get_css_context': return getCssContext(input);
-      case 'get_page_outline': return getPageOutline(input);
       case 'get_region': return getRegion(input);
       default: throw new Error('Unknown Pixso Advanced MCP command: ' + command);
     }
@@ -425,97 +424,6 @@
       exportPreview: preview,
       dataBase64: bytesToBase64(bytes)
     };
-  }
-
-  async function getCodingContext(input) {
-    const request = input || {};
-    const node = await resolveNodeOrSelection(request.nodeId);
-    const requestedOptions = normalizeCodingContextOptions(request);
-
-    // Default to a complete, untruncated scan. A partial scan is worse than a slightly
-    // more expensive one: callers cannot implement from data that is silently missing.
-    // Only an explicit allowPartial turns this off.
-    const allowPartial = request.allowPartial === true;
-    const options = allowPartial
-      ? requestedOptions
-      : widenCodingOptions(requestedOptions, request);
-    const autoWidened = !allowPartial && widenedDiff(requestedOptions, options).length
-      ? {
-          requestedProfile: requestedOptions.profile,
-          requestedDepth: requestedOptions.treeDepth,
-          usedProfile: options.profile,
-          usedDepth: options.treeDepth,
-          reason: 'The scan was widened so the returned design facts are complete and not silently truncated.'
-        }
-      : null;
-
-    const snapshot = await buildFrameSnapshot(node, options, createPerformanceTracker(options.performanceProfile, options.budgetMs), 'coding');
-    const coverage = buildCoverageReport(snapshot);
-
-    const response = compileCodingContext(snapshot, request);
-    const finalResponse = applyOutputBudget(response, options.maxBytes, {
-      profile: options.profile,
-      primarySections: ['screen', 'quality', 'nodeIndex', 'regions', 'patterns', 'criticalDimensions', 'verificationTargets', 'fidelityChecklist', 'productionGuidance', 'typography', 'colors', 'assets', 'cssSummary', 'nextRecommendedCalls'],
-      soft: options.profile !== 'verbose'
-    });
-
-    const outputTruncated = Boolean(finalResponse.budget && finalResponse.budget.truncated);
-    finalResponse.coverage = outputTruncated
-      ? {
-        ...coverage,
-        outputTruncated: true,
-        complete: false,
-        note: 'The response exceeded maxBytes and whole sections were dropped. Re-run with a higher maxBytes or narrower scope.'
-      }
-      : coverage;
-    finalResponse.factConfidence = buildFactConfidence(snapshot);
-    if (autoWidened) finalResponse.autoWidened = autoWidened;
-    if (!finalResponse.coverage.complete) {
-      finalResponse.warnings = Array.from(new Set([
-        ...(finalResponse.warnings || []),
-        allowPartial
-          ? 'The scan is incomplete and allowPartial was set, so partial facts were returned on purpose.'
-          : 'The scan is still incomplete even after widening; regions and patterns were derived from a partial tree. Check coverage before implementing.'
-      ]));
-    }
-    return finalResponse;
-  }
-
-  function widenCodingOptions(options, request) {
-    const raw = request || {};
-    // Profile-derived limits are widened so the default call returns a complete,
-    // untruncated design scan. Explicit numeric ceilings are still honored.
-    const widened = {
-      ...options,
-      profile: 'deep',
-      detail: 'deep',
-      performanceProfile: 'deep',
-      treeDepth: 12,
-      treeDetail: 'full',
-      includeText: true,
-      includeLayoutAnalysis: true,
-      includeRepeatedPatterns: true,
-      includeAssets: true,
-      includeScreenshot: 'none',
-      maxNodes: 3000,
-      maxTextChars: 8000,
-      maxTypographyVisitedNodes: 20000,
-      budgetMs: 60000,
-      maxBytes: 1000000
-    };
-    if (raw.budgetMs != null) widened.budgetMs = options.budgetMs;
-    if (raw.maxNodes != null) widened.maxNodes = options.maxNodes;
-    if (raw.maxTextChars != null) widened.maxTextChars = options.maxTextChars;
-    if (raw.maxTypographyVisitedNodes != null) widened.maxTypographyVisitedNodes = options.maxTypographyVisitedNodes;
-    if (raw.maxBytes != null) widened.maxBytes = options.maxBytes;
-    return widened;
-  }
-
-  function widenedDiff(before, after) {
-    const keys = ['profile', 'detail', 'performanceProfile', 'treeDepth', 'treeDetail', 'maxNodes', 'maxTextChars', 'maxTypographyVisitedNodes', 'budgetMs', 'maxBytes'];
-    const changed = [];
-    for (const key of keys) if (before[key] !== after[key]) changed.push(key);
-    return changed;
   }
 
   async function buildFrameSnapshot(node, options, performance, purpose) {
@@ -1035,15 +943,25 @@
     });
   }
 
-  function compilePageOutline(snapshot, input) {
+  function compileDesignOverview(snapshot, input) {
     const tree = snapshot.tree;
-    const aliases = snapshot.aliases;
     const computed = snapshot.computedLayout || {};
     const spacingByParentId = new Map((computed.spacingAnalysis || []).map(item => [item.parentNodeId, item]));
     const maxRegions = clampInt(input && input.maxRegions, 2, 40, 16);
-    const subRegionLimit = clampInt(input && input.subRegionsPerRegion, 0, 8, 2);
-
     const coverage = buildCoverageReport(snapshot);
+
+    // Compute maxDepth from the scanned tree.
+    let maxDepth = 0;
+    const stack = tree ? [{ node: tree, depth: 0 }] : [];
+    while (stack.length) {
+      const item = stack.pop();
+      if (!item) continue;
+      if (item.depth > maxDepth) maxDepth = item.depth;
+      if (Array.isArray(item.node && item.node.children)) {
+        for (const child of item.node.children) stack.push({ node: child, depth: item.depth + 1 });
+      }
+    }
+
     const rootChildren = (Array.isArray(tree && tree.children) ? tree.children : [])
       .filter(child => child && child.type !== 'TEXT');
     const ordered = rootChildren.slice().sort((a, b) => {
@@ -1054,27 +972,11 @@
       return ay - by || ax - bx;
     });
 
-    const regions = [];
-    const buildOrder = [{
-      step: 0,
-      kind: 'shell',
-      nodeId: tree ? tree.id : snapshot.rootNode.id,
-      name: tree ? tree.name : snapshot.rootNode.name,
-      note: 'Implement the root container first: display, direction, gap, padding. Do not place children by absolute coordinates.'
-    }];
-
-    for (const child of ordered.slice(0, maxRegions)) {
+    const regions = ordered.slice(0, maxRegions).map(child => {
       const spacing = spacingByParentId.get(child.id);
-      const subRegions = subRegionLimit > 0
-        ? (Array.isArray(child.children) ? child.children : [])
-          .filter(item => item && item.type !== 'TEXT' && Array.isArray(item.children) && item.children.length)
-          .slice(0, subRegionLimit)
-          .map(item => subRegionSummary(item, spacingByParentId))
-        : [];
-      regions.push(clean({
+      return clean({
         key: regionKeyFor(child),
         nodeId: child.id,
-        alias: aliases.get(child.id) || undefined,
         name: child.name,
         type: child.type,
         role: compactRoleGuess(child),
@@ -1082,14 +984,13 @@
         size: { width: roundNumber(child.bounds && child.bounds.width), height: roundNumber(child.bounds && child.bounds.height) },
         nodeCount: countSerializedDescendants(child),
         textNodeCount: countSerializedByType(child, 'TEXT'),
-        shell: regionShellFacts(child, spacing),
-        subRegions: subRegions.length ? subRegions : undefined,
         buildHint: buildOrderNote(child, spacing)
-      }));
-    }
+      });
+    });
 
-    regions.forEach((region, index) => {
-      buildOrder.push({
+    const buildPlan = [
+      { step: 0, kind: 'shell', nodeId: tree ? tree.id : snapshot.rootNode.id, name: tree ? tree.name : snapshot.rootNode.name, note: 'Implement the root container first: display, direction, gap, padding. Do not place children by absolute coordinates.' },
+      ...regions.map((region, index) => ({
         step: index + 1,
         kind: 'region',
         regionKey: region.key,
@@ -1097,11 +998,34 @@
         name: region.name,
         role: region.role,
         note: region.buildHint
-      });
+      }))
+    ];
+
+    const patterns = (snapshot.patterns || []).slice(0, 12).map(pattern => clean({
+      key: pattern.key,
+      role: pattern.role,
+      count: pattern.count,
+      itemSize: pattern.itemSize,
+      guidance: pattern.guidance
+    }));
+
+    const contract = clean({
+      regions: regions.map(r => clean({ key: r.key, nodeId: r.nodeId, name: r.name, size: r.size })),
+      criticalDimensions: (snapshot.criticalDimensions || []).slice(0, 32),
+      verificationTargets: snapshot.verificationTargets,
+      fidelityChecklist: snapshot.fidelityChecklist
     });
 
+    const ambiguities = [
+      'Hover/focus/disabled states: not present in this frame. Ask the user or stub.',
+      'Mobile breakpoint: no responsive variant frame was found. Ask the user or use the desktop layout.',
+      'Loading and empty states: not present. Ask the user or stub.',
+      'Data contracts (APIs, route names): design facts only. Derive from the codebase or ask the user.',
+      'Interaction states for components: not in scope unless present as variant frames.'
+    ].filter(Boolean);
+
     return clean({
-      kind: 'page-outline',
+      kind: 'design-overview',
       root: {
         nodeId: snapshot.rootNode.id,
         name: snapshot.rootNode.name,
@@ -1110,27 +1034,25 @@
         selected: currentSelection().some(node => node.id === snapshot.rootNode.id)
       },
       coverage,
+      shape: {
+        regionCount: regions.length,
+        totalNodes: coverage.totalNodes,
+        totalTextNodes: snapshot.typography && Array.isArray(snapshot.typography.textNodes) ? snapshot.typography.textNodes.length : countSerializedByType(tree, 'TEXT'),
+        maxDepth,
+        patterns
+      },
+      buildPlan,
+      contract,
+      ambiguities,
       factConfidence: buildFactConfidence(snapshot),
-      regionCount: regions.length,
-      regions,
-      buildOrder,
-      repeatedPatterns: (snapshot.patterns || []).slice(0, 12).map(pattern => clean({
-        key: pattern.key,
-        role: pattern.role,
-        count: pattern.count,
-        itemSize: pattern.itemSize,
-        layout: pattern.layout,
-        exampleNode: pattern.exampleNode,
-        guidance: pattern.guidance
-      })),
-      next: regions.length ? {
+      nextCall: regions.length ? {
         tool: 'get_region',
         args: { nodeId: regions[0].nodeId },
-        reason: 'Fetch the first region in build order. Do not request the whole page at once.'
+        reason: 'Fetch the first region in build plan. Do not request the whole design in one call.'
       } : undefined,
       warnings: Array.from(new Set([
         ...(snapshot.warnings || []),
-        coverage.complete ? undefined : 'Outline coverage is incomplete; resolve coverage before implementing the page.'
+        coverage.complete ? undefined : 'Overview coverage is incomplete; resolve coverage before implementing.'
       ].filter(Boolean)))
     });
   }
@@ -1188,7 +1110,7 @@
     return response;
   }
 
-  async function getPageOutline(input) {
+  async function scanDesign(input) {
     const node = await resolveNodeOrSelection(input.nodeId);
     const options = normalizeCodingContextOptions({
       profile: 'balanced',
@@ -1211,7 +1133,7 @@
     options.treeDetail = 'summary';
     const performance = createPerformanceTracker('balanced', options.budgetMs);
     const snapshot = await buildFrameSnapshot(node, options, performance, 'coding');
-    return compilePageOutline(snapshot, input || {});
+    return compileDesignOverview(snapshot, input || {});
   }
 
   async function getRegion(input) {
@@ -4963,9 +4885,9 @@
         tool: 'get_css_context',
         priority: snapshot.patterns.length || snapshot.semanticRegions.length > 8 ? 'optional' : 'optional',
         args: { nodeId: snapshot.rootNode.id, mode: 'compact', scope: 'key', groupDuplicates: true, omitDefaults: true, selectorStrategy: 'alias', guidanceProfile: 'agent' },
-        reason: 'Call only after get_coding_context if CSS-ready declarations are needed for key regions or repeated patterns.'
+        reason: 'Call only after scan_design if CSS-ready declarations are needed for key regions or repeated patterns.'
       },
-      note: 'get_coding_context is the primary design scan; get_css_context is secondary CSS detail.'
+      note: 'scan_design is the primary design scan; get_css_context is secondary CSS detail.'
     });
   }
 

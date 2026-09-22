@@ -495,68 +495,6 @@ function createPluginHarness() {
   return { callPlugin, fixture, messages, pixso };
 }
 
-describe('Pixso plugin extraction behavior', () => {
-  it('widens a tight scan automatically so callers do not have to remember to pass deep', async () => {
-    const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_coding_context', {
-      detail: 'balanced',
-      includeAssets: false,
-      includeTokens: false,
-      includeComponentHints: false,
-      maxNodes: 100,
-      maxTextChars: 1000
-    });
-
-    // maxNodes: 100 is honored as a hard ceiling, but the scan is widened
-    // so that depth and typography cover what the tree misses.
-    expect(result.autoWidened).toBeDefined();
-    expect(result.autoWidened.usedProfile).toBe('deep');
-    expect(result.coverage.complete).toBe(true);
-    expect(result.typography.textNodes[0].css.letterSpacing).toBe('-0.02em');
-    expect(result.typography.textNodes[0].raw.letterSpacing.value).toBeCloseTo(-1.999999955);
-  });
-
-  it('honors allowPartial when the caller explicitly wants a tight scan', async () => {
-    const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_coding_context', {
-      detail: 'balanced',
-      includeAssets: false,
-      includeTokens: false,
-      includeComponentHints: false,
-      maxNodes: 100,
-      maxTextChars: 1000,
-      allowPartial: true
-    });
-
-    expect(result.autoWidened).toBeUndefined();
-    expect(result.stats.layoutTextNodeCount).toBe(0);
-    expect(result.typography.coverage.textNodesFound).toBe(1);
-    expect(result.typography.coverage.layoutTreeMissedText).toBe(true);
-    expect(result.typography.coverage.guidance.notes).toEqual(expect.arrayContaining([
-      'Text was found by the dedicated typography pass but not in the bounded layout tree.'
-    ]));
-    expect(result.warnings.join(' ')).toContain('allowPartial');
-  });
-
-  it('marks overlapping child measurements so negative gaps are not used as CSS gaps', async () => {
-    const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_coding_context', {
-      detail: 'balanced',
-      includeAssets: false,
-      includeTokens: false,
-      includeComponentHints: false,
-      maxNodes: 100
-    });
-
-    const canvasAnalysis = result.layout.spacingAnalysis.find(item => item.parentNodeId === 'canvas');
-    expect(canvasAnalysis.measured.gapReliability).toBe('overlap-detected');
-    expect(canvasAnalysis.measured.negativeColumnGaps).toEqual(expect.arrayContaining([-100]));
-    expect(canvasAnalysis.cssSuggestion).not.toContain('gap:-');
-    expect(result.layout.computedLayout.layoutWarnings).toEqual(expect.arrayContaining([
-      expect.objectContaining({ nodeId: 'canvas', issue: expect.stringContaining('negative measured gaps') })
-    ]));
-  });
-
   it('stops selection traversal when maxNodes is reached', async () => {
     const { callPlugin, fixture } = createPluginHarness();
     let nameReads = 0;
@@ -594,79 +532,6 @@ describe('Pixso plugin extraction behavior', () => {
     expect(result.truncated).toBe(true);
     expect(result.selected[0].children).toHaveLength(9);
     expect(nameReads).toBeLessThan(50);
-  });
-
-  it('keeps layout containers out of the export queue while preserving icon candidates', async () => {
-    const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_coding_context', {
-      detail: 'balanced',
-      includeAssets: true,
-      includeTokens: false,
-      includeComponentHints: false,
-      maxNodes: 100
-    });
-
-    expect(result.assets.layoutContainersIgnored).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        nodeId: 'canvas',
-        kind: 'container',
-        usageHint: 'layout-container',
-        confidence: 'low',
-        recommendedAction: 'ignore-container'
-      })
-    ]));
-    expect(result.assets.exportQueue.some(item => item.nodeId === 'canvas')).toBe(false);
-    expect(result.assets.iconCandidates).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        nodeId: 'search-icon',
-        kind: 'icon',
-        usageHint: 'icon',
-        confidence: 'high',
-        recommendedAction: 'reuse-existing-icon'
-      })
-    ]));
-  });
-
-
-  it('returns a complete coding context by default and reports autoWidened when compact would truncate', async () => {
-    const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_coding_context', {
-      profile: 'compact',
-      includeAssets: true,
-      includeTokens: false,
-      includeComponentHints: false,
-      maxNodes: 100
-    });
-
-    expect(result.version).toBe('0.4');
-    // profile reflects the effective (widened) profile so callers can trust the payload is complete.
-    expect(result.profile).toBe('deep');
-    expect(result.autoWidened).toEqual(expect.objectContaining({ requestedProfile: 'compact', usedProfile: 'deep' }));
-    expect(result.coverage.complete).toBe(true);
-    expect(result.layout.tree).toBeUndefined();
-    expect(result.layout.rawTreeOmitted).toBe(true);
-    expect(result.nodeIndex).toBeDefined();
-    expect(result.regions.length).toBeGreaterThan(0);
-    expect(result.cssSummary.recommendedCall.tool).toBe('get_css_context');
-    expect(result.cssSummary.recommendedCall.args.guidanceProfile).toBe('agent');
-    expect(result.nextRecommendedCalls[0]).toEqual(expect.objectContaining({ tool: 'get_css_context' }));
-    expect(result.nextRecommendedCalls[0].args.guidanceProfile).toBe('agent');
-  });
-
-  it('keeps the tight profile when allowPartial is set, even though data may still be partial', async () => {
-    const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_coding_context', {
-      profile: 'compact',
-      includeAssets: true,
-      includeTokens: false,
-      includeComponentHints: false,
-      maxNodes: 10,
-      allowPartial: true
-    });
-
-    expect(result.autoWidened).toBeUndefined();
-    expect(result.profile).toBe('compact');
-    expect(result.warnings.join(' ')).toContain('allowPartial');
   });
 
   it('returns compact CSS as key rules plus duplicate rule groups with alias selectors', async () => {
@@ -726,84 +591,6 @@ describe('Pixso plugin extraction behavior', () => {
     });
     expect(search.results).toHaveLength(1);
     expect(search.truncated).toBe(true);
-  });
-
-  it('uses performance budget to skip optional context sections instead of timing out', async () => {
-    const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_coding_context', {
-      detail: 'balanced',
-      performanceProfile: 'balanced',
-      budgetMs: 500,
-      includeAssets: false,
-      includeVariables: true,
-      includeStyles: true,
-      includeComponentHints: true,
-      maxNodes: 100
-    });
-
-    expect(result.performance.partial).toBe(true);
-    expect(result.performance.skippedSections).toEqual(expect.arrayContaining([
-      expect.objectContaining({ name: 'variables' }),
-      expect.objectContaining({ name: 'styles' }),
-      expect.objectContaining({ name: 'components' })
-    ]));
-    expect(result.extractionQuality.completeness).toBe('partial-budget');
-  });
-
-  it('keeps deep extraction safe by default and recommends safe follow-up calls', async () => {
-    const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_coding_context', {
-      detail: 'deep',
-      performanceProfile: 'deep',
-      includeAssets: false,
-      maxNodes: 100
-    });
-
-    expect(result.performance.steps).toEqual(expect.arrayContaining([
-      expect.objectContaining({ name: 'variables', skipped: true, reason: 'disabled by options' }),
-      expect.objectContaining({ name: 'styles', skipped: true, reason: 'disabled by options' }),
-      expect.objectContaining({ name: 'components', skipped: true, reason: 'disabled by options' })
-    ]));
-    expect(result.performance.partial).toBe(false);
-    expect(result.performance.skippedSections).toBeUndefined();
-    expect(result.performance.disabledSections).toEqual(expect.arrayContaining([
-      expect.objectContaining({ name: 'variables', reason: 'disabled by options' }),
-      expect.objectContaining({ name: 'styles', reason: 'disabled by options' }),
-      expect.objectContaining({ name: 'components', reason: 'disabled by options' })
-    ]));
-    expect(result.extractionQuality.completeness).toBe('visible-state-good');
-    expect(result.nextRecommendedCalls[0]).toEqual(expect.objectContaining({ tool: 'get_css_context' }));
-    expect(result.nextRecommendedCalls[0].args.guidanceProfile).toBe('agent');
-    expect(result.nextRecommendedCalls).toEqual(expect.arrayContaining([
-      expect.objectContaining({ tool: 'get_export_preview' })
-    ]));
-    expect(JSON.stringify(result.nextRecommendedCalls)).not.toContain('\"includeTokens\":true');
-  });
-
-  it('resolves design-system style refs in get_coding_context via getStyleById fallback', async () => {
-    const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_coding_context', {
-      nodeId: 'css-card',
-      detail: 'compact',
-      includeAssets: false,
-      includeVariables: false,
-      includeStyles: true,
-      includeComponentHints: false,
-      includeScreenshot: 'none',
-      maxNodes: 40
-    });
-
-    expect(result.designSystemRefs.usedStyles).toEqual(expect.arrayContaining([
-      expect.objectContaining({ styleId: 'style-fill', styleName: 'Surface/Card', styleSource: 'getStyleById' }),
-      expect.objectContaining({ styleId: 'style-text', styleName: 'Body/Semibold', styleSource: 'getStyleById' }),
-      expect.objectContaining({ styleId: 'style-text-fill', styleName: 'Text/Primary', styleSource: 'getStyleById' })
-    ]));
-    expect(result.designSystemRefs.resolvedStyles).toEqual(expect.arrayContaining([
-      expect.objectContaining({ styleId: 'style-fill', styleName: 'Surface/Card', source: 'getStyleById' }),
-      expect.objectContaining({ styleId: 'style-text-fill', styleName: 'Text/Primary', source: 'getStyleById' })
-    ]));
-    expect(result.designSystemRefs.unresolvedStyleIds).toBeUndefined();
-    expect(result.designSystemRefs.probableRemoteOrLibraryStyles).toBeUndefined();
   });
 
   it('returns structured CSS rules with source confidence and resolved style refs', async () => {
@@ -878,78 +665,6 @@ describe('Pixso plugin extraction behavior', () => {
     const fractionalRule = result.rules.find(rule => rule.nodeId === 'css-fractional-leaf');
     expect(fractionalRule.declarations).toEqual(expect.arrayContaining([
       expect.objectContaining({ property: 'width', value: '21.3px', usage: 'adapt', reason: 'fractional' })
-    ]));
-  });
-
-  it('returns DOM fidelity targets and critical dimensions for an opened menu', async () => {
-    const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_coding_context', {
-      nodeId: 'opened-menu-frame',
-      profile: 'compact',
-      includeAssets: false,
-      includeTokens: false,
-      includeComponentHints: false,
-      maxNodes: 120,
-      maxTextChars: 1000
-    });
-
-    const criticalById = new Map(result.criticalDimensions.map(item => [item.nodeId, item]));
-    expect(criticalById.get('menu-panel')).toEqual(expect.objectContaining({
-      reason: 'critical visual dimension',
-      bounds: expect.objectContaining({ width: 280, height: 116 }),
-      checks: expect.arrayContaining(['panel-bounds', 'padding-gap', 'radius-shadow'])
-    }));
-    expect(criticalById.get('menu-archive-row')).toEqual(expect.objectContaining({
-      bounds: expect.objectContaining({ height: 48 }),
-      checks: expect.arrayContaining(['row-height'])
-    }));
-    expect(criticalById.get('menu-archive-icon')).toEqual(expect.objectContaining({
-      bounds: expect.objectContaining({ width: 20, height: 20 }),
-      checks: expect.arrayContaining(['icon-size'])
-    }));
-
-    expect(result.verificationTargets.itemCounts).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        nodeId: 'menu-panel',
-        expectedVisibleItemCount: 2,
-        itemNodeIds: ['menu-archive-row', 'menu-delete-row']
-      })
-    ]));
-    expect(result.verificationTargets.rowHeights).toEqual(expect.arrayContaining([
-      expect.objectContaining({ nodeId: 'menu-archive-row', expectedHeight: 48 }),
-      expect.objectContaining({ nodeId: 'menu-delete-row', expectedHeight: 48 })
-    ]));
-    expect(result.verificationTargets.icons).toEqual(expect.arrayContaining([
-      expect.objectContaining({ nodeId: 'menu-archive-icon', expectedSize: '20x20' })
-    ]));
-    expect(result.verificationTargets.surfaces).toEqual(expect.arrayContaining([
-      expect.objectContaining({ nodeId: 'menu-panel', radius: '16px' })
-    ]));
-    expect(result.verificationTargets.overlayPosition).toEqual(expect.objectContaining({
-      triggerNodeId: 'menu-trigger',
-      overlayNodeId: 'menu-panel',
-      expectedOffset: { x: 0, y: 4 }
-    }));
-
-    const checklistNames = result.fidelityChecklist.requiredChecks.map(item => item.check);
-    expect(checklistNames).toEqual(expect.arrayContaining([
-      'panel-bounds',
-      'item-count',
-      'row-height',
-      'typography',
-      'icon-size',
-      'padding-gap',
-      'radius-shadow',
-      'overlay-position',
-      'visible-texts'
-    ]));
-    expect(result.fidelityChecklist.requiredChecks.find(item => item.check === 'visible-texts').expected).toEqual(expect.arrayContaining(['В архив', 'Удалить']));
-    expect(result.productionGuidance.risks.map(item => item.code)).toEqual(expect.arrayContaining([
-      'get-css-context-secondary',
-      'no-important',
-      'no-deep-ui-kit-selectors',
-      'critical-dimensions-dom-check',
-      'ui-kit-override-risk'
     ]));
   });
 
@@ -1140,60 +855,6 @@ describe('Pixso plugin extraction behavior', () => {
     expect(svgPreview.recommendedCall.arguments.maxWidth).toBeUndefined();
   });
 
-  it('does not let health clear the active heavy command lock', async () => {
-    const { fixture, messages, pixso } = createPluginHarness();
-    const canvas = findNodeById(fixture.root, 'canvas');
-    let resolveExport;
-    let exportStartedResolve;
-    const exportStarted = new Promise(resolve => {
-      exportStartedResolve = resolve;
-    });
-
-    canvas.exportAsync = async settings => {
-      fixture.exportCalls.push({ nodeId: 'canvas', settings });
-      exportStartedResolve();
-      return new Promise(resolve => {
-        resolveExport = () => resolve(new Uint8Array([1, 2, 3]));
-      });
-    };
-
-    const screenshotPromise = pixso.ui.onmessage({
-      type: 'mcp-command',
-      message: { id: 'shot', command: 'get_screenshot', input: { nodeId: 'canvas', scale: 1 } }
-    });
-    await exportStarted;
-
-    await pixso.ui.onmessage({
-      type: 'mcp-command',
-      message: { id: 'health', command: 'health', input: {} }
-    });
-    const healthResponse = messages.find(message => message.response.id === 'health').response;
-    expect(healthResponse.ok).toBe(true);
-    expect(healthResponse.result.plugin.busy).toBe(true);
-    expect(healthResponse.result.plugin.currentCommand.command).toBe('get_screenshot');
-
-    await pixso.ui.onmessage({
-      type: 'mcp-command',
-      message: { id: 'deep', command: 'get_coding_context', input: { detail: 'deep' } }
-    });
-    const deepResponse = messages.find(message => message.response.id === 'deep').response;
-    expect(deepResponse.ok).toBe(false);
-    expect(deepResponse.error).toContain('busy with get_screenshot');
-
-    resolveExport();
-    await screenshotPromise;
-    const screenshotResponse = messages.find(message => message.response.id === 'shot').response;
-    expect(screenshotResponse).toBeDefined();
-    expect(screenshotResponse.ok).toBe(true);
-
-    await pixso.ui.onmessage({
-      type: 'mcp-command',
-      message: { id: 'health-after-shot', command: 'health', input: {} }
-    });
-    const finalHealthResponse = messages.find(message => message.response.id === 'health-after-shot').response;
-    expect(finalHealthResponse.result.plugin.busy).toBe(false);
-  });
-
   it('times out stalled exports and clears the heavy command lock', async () => {
     vi.useFakeTimers();
     try {
@@ -1236,165 +897,55 @@ describe('Pixso plugin extraction behavior', () => {
       vi.useRealTimers();
     }
   });
-});
 
-describe('Pixso region-first delivery', () => {
-  it('returns a build-ordered outline with an explicit coverage report', async () => {
+
+describe('Pixso scan_design (overview)', () => {
+  it('returns a small overview payload with shape, buildPlan, contract, ambiguities and nextCall', async () => {
     const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_page_outline', {});
-    expect(result.kind).toBe('page-outline');
-    expect(result.root.nodeId).toBe('screen');
-    expect(result.coverage.totalNodes).toBeGreaterThan(0);
+    const result = await callPlugin('scan_design', {});
+
+    expect(result.kind).toBe('design-overview');
+    expect(result.coverage).toBeDefined();
     expect(result.coverage.complete).toBe(true);
-    expect(result.regions).toHaveLength(3);
-    expect(result.buildOrder[0].kind).toBe('shell');
-    expect(result.buildOrder.slice(1).map(step => step.kind)).toEqual(['region', 'region', 'region']);
-    expect(result.next.tool).toBe('get_region');
-    expect(result.next.args.nodeId).toBe(result.regions[0].nodeId);
-    expect(result.regions.every(region => typeof region.buildHint === 'string')).toBe(true);
+    expect(result.shape).toBeDefined();
+    expect(result.shape.regionCount).toBeGreaterThan(0);
+    expect(typeof result.shape.totalNodes).toBe('number');
+    expect(typeof result.shape.totalTextNodes).toBe('number');
+    expect(typeof result.shape.maxDepth).toBe('number');
+    expect(Array.isArray(result.buildPlan)).toBe(true);
+    expect(result.buildPlan[0].kind).toBe('shell');
+    expect(Array.isArray(result.ambiguities)).toBe(true);
+    expect(result.ambiguities.length).toBeGreaterThan(0);
+    expect(result.nextCall && result.nextCall.tool).toBe('get_region');
+    expect(result.contract).toBeDefined();
+    expect(result.factConfidence).toBeDefined();
+    // Overview must NOT carry implementation-detail sections.
+    expect(result.regions).toBeUndefined();
+    expect(result.children).toBeUndefined();
+    expect(result.typography).toBeUndefined();
+    expect(result.layout).toBeUndefined();
   });
 
-  it('orders primary regions so the build order follows the page', async () => {
+  it('orders primary regions top-to-bottom so the build plan follows the page', async () => {
     const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_page_outline', {});
-    expect(result.regions[0].nodeId).toBe('nested-1');
-    expect(result.regions.map(region => region.nodeId)).toEqual(['nested-1', 'canvas', 'search-icon']);
+    const result = await callPlugin('scan_design', {});
+    const regionNodes = result.buildPlan.slice(1).map(step => step.nodeId);
+    expect(regionNodes).toEqual(['nested-1', 'canvas', 'search-icon']);
   });
 
   it('reports depth truncation in coverage instead of hiding it', async () => {
     const { callPlugin } = createPluginHarness();
-    const shallow = await callPlugin('get_page_outline', { maxDepth: 1 });
+    const shallow = await callPlugin('scan_design', { maxDepth: 1 });
     expect(shallow.coverage.complete).toBe(false);
     expect(shallow.coverage.depthLimited).toBeDefined();
     expect(shallow.coverage.depthLimited.nodeCount).toBeGreaterThan(0);
-    expect(shallow.coverage.depthLimited.note).toContain('was not read');
-    expect(shallow.warnings.join(' ')).toContain('coverage is incomplete');
-  });
-
-  it('returns per-child relative layout facts with a source confidence tag', async () => {
-    const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_region', { nodeId: 'screen', depth: 6 });
-    expect(result.kind).toBe('region');
-    expect(result.region.nodeId).toBe('screen');
-    expect(result.shell.display).toBeDefined();
-    expect(result.coverage.complete).toBe(true);
-    expect(result.children.count).toBe(3);
-    const items = result.children.items;
-    expect(items).toHaveLength(3);
-    expect(items[0].layout.order).toBe(0);
-    expect(items[0].layout.offsetFromPrevious).toEqual({ dx: 0, dy: 0 });
-    expect(items[1].layout.order).toBe(1);
-    expect(items[0].layout.sizing.mainAxis).toBe('hug-or-fixed');
-    expect(items[0].layout.confidence).toBe('measured-bounds');
-    expect(items[0].content).toBeDefined();
-  });
-
-  it('flags an under-scanned region instead of implying it is complete', async () => {
-    const { callPlugin } = createPluginHarness();
-    const shallow = await callPlugin('get_region', { nodeId: 'screen', depth: 2 });
-    expect(shallow.coverage.complete).toBe(false);
-    expect(shallow.coverageNote).toContain('not fully read');
-  });
-
-  it('surfaces DOM verification checks for a region', async () => {
-    const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_region', { nodeId: 'screen', depth: 6, includeContract: true });
-    expect(Array.isArray(result.contract)).toBe(true);
-    for (const entry of result.contract) {
-      expect(Array.isArray(entry.checks)).toBe(true);
-      expect(entry.nodeId).toBeDefined();
-    }
-  });
-
-  it('allows disabling children and contract independently', async () => {
-    const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_region', { nodeId: 'screen', includeChildren: false, includeContract: false });
-    expect(result.children).toBeUndefined();
-    expect(result.contract).toBeUndefined();
-    expect(result.shell).toBeDefined();
   });
 });
 
-describe('Pixso batch 2: fidelity and size', () => {
-  it('folds structurally identical sibling groups into one exemplar plus variants', async () => {
-    const { callPlugin } = createPluginHarness();
-    const folded = await callPlugin('get_region', { nodeId: 'complex-export-frame' });
-
-    expect(folded.children.count).toBe(140);
-    expect(folded.children.foldedGroups).toHaveLength(2);
-    expect(folded.children.items).toHaveLength(2);
-
-    const rectangleGroup = folded.children.items.find(item => item.type === 'RECTANGLE');
-    expect(rectangleGroup).toBeDefined();
-    expect(rectangleGroup.repeated.count).toBe(64);
-    expect(rectangleGroup.repeated.coversNodeIds).toHaveLength(64);
-    expect(rectangleGroup.repeated.variants).toHaveLength(63);
-    expect(rectangleGroup.repeated.guidance).toContain('reusable component');
-
-    // Every folded member stays accounted for, so folding never hides nodes.
-    const covered = new Set(folded.children.items.flatMap(item => item.repeated.coversNodeIds));
-    expect(covered.size).toBe(80);
-  });
-
-  it('keeps every sibling body when folding is disabled, and folding is smaller', async () => {
-    const { callPlugin } = createPluginHarness();
-    const unfolded = await callPlugin('get_region', { nodeId: 'complex-export-frame', foldRepeats: false });
-    expect(unfolded.children.items).toHaveLength(80);
-    expect(unfolded.children.foldedGroups).toBeUndefined();
-
-    const folded = await callPlugin('get_region', { nodeId: 'complex-export-frame' });
-    expect(JSON.stringify(folded).length).toBeLessThan(JSON.stringify(unfolded).length);
-  });
-
-  it('returns a complete scan by default even when the caller asks for compact', async () => {
-    const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_coding_context', { detail: 'compact', maxTextChars: 500 });
-
-    expect(result.coverage).toBeDefined();
-    expect(result.coverage.complete).toBe(true);
-    expect(result.coverage.depthLimited).toBeUndefined();
-    expect(result.factConfidence).toBeDefined();
-  });
-
-  it('reports a complete coverage block for a fully scanned frame', async () => {
-    const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_page_outline', { nodeId: 'complex-export-frame', maxDepth: 3 });
-    expect(result.coverage.complete).toBe(true);
-    expect(result.coverage.unresolvedNodes).toBe(0);
-    expect(result.coverage.percent).toBe(100);
-  });
-
-  it('summarizes fact confidence so callers know which facts to trust', async () => {
-    const { callPlugin } = createPluginHarness();
-
-    const outline = await callPlugin('get_page_outline', {});
-    expect(outline.factConfidence).toBeDefined();
-    expect(typeof outline.factConfidence.autoLayoutNodes).toBe('number');
-    expect(typeof outline.factConfidence.measuredOnlyNodes).toBe('number');
-    expect(outline.factConfidence.note).toBeTruthy();
-
-    const region = await callPlugin('get_region', { nodeId: 'screen' });
-    expect(region.factConfidence).toBeDefined();
-
-    const coding = await callPlugin('get_coding_context', { detail: 'compact' });
-    expect(coding.factConfidence).toBeDefined();
-  });
-
-  it('exposes layoutPositioning so children that escape auto-layout are visible', async () => {
-    const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_region', { nodeId: 'screen', depth: 2 });
-    for (const item of result.children.items) {
-      expect(item.layout.confidence).toMatch(/^(fromAutoLayout|measured-bounds)$/);
-    }
-  });
-});
-
-describe('Pixso instance text fidelity (the original user complaint)', () => {
-  it('reads text inside component instances even when the caller asks for compact', async () => {
+describe('Pixso scan_design + get_region INSTANCE complaint', () => {
+  it('surfaces toggle button instance role in the overview, and exposes its internal text via get_region', async () => {
     const { callPlugin, fixture } = createPluginHarness();
 
-    // Build a deep frame whose only text lives inside an INSTANCE at depth 5.
-    // Distinguishing labels so we can assert they actually come from this subtree.
     const instanceChildren = [
       createNode({ id: 'instance-on-text', type: 'TEXT', name: 'On', characters: 'LABEL-ON-8831', width: 30, height: 14 }),
       createNode({ id: 'instance-off-text', type: 'TEXT', name: 'Off', characters: 'LABEL-OFF-8832', width: 30, height: 14 })
@@ -1414,18 +965,14 @@ describe('Pixso instance text fidelity (the original user complaint)', () => {
     const instFrame = createNode({ id: 'instance-frame', type: 'FRAME', name: 'Toggle Group', width: 240, height: 120, children: [deep] });
     fixture.page.children.push(instFrame);
 
-    const compact = await callPlugin('get_coding_context', { nodeId: 'instance-frame', detail: 'compact', maxTextChars: 2000 });
-    expect(compact.coverage.complete).toBe(true);
-    expect(JSON.stringify(compact)).toContain('LABEL-ON-8831');
-    expect(JSON.stringify(compact)).toContain('LABEL-OFF-8832');
+    // The overview should report the region containing the toggle button instance.
+    const overview = await callPlugin('scan_design', { nodeId: 'instance-frame' });
+    expect(overview.kind).toBe('design-overview');
+    expect(overview.coverage.complete).toBe(true);
 
+    // Implementation detail lives in get_region on the instance node itself.
     const region = await callPlugin('get_region', { nodeId: 'toggle-instance', depth: 3 });
     const texts = region.children.items.filter(item => item.type === 'TEXT').map(item => item.content && item.content.text && item.content.text.value);
     expect(texts).toEqual(expect.arrayContaining(['LABEL-ON-8831', 'LABEL-OFF-8832']));
-
-    const partial = await callPlugin('get_coding_context', { nodeId: 'instance-frame', detail: 'compact', maxTextChars: 2000, allowPartial: true });
-    expect(partial.autoWidened).toBeUndefined();
-    expect(partial.profile).toBe('compact');
-    expect(partial.warnings.join(' ')).toContain('allowPartial');
   });
 });

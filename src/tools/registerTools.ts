@@ -6,20 +6,19 @@ import {
   emptySchema,
   exportAssetSchema,
   findRelatedFramesSchema,
-  getCodingContextSchema,
   getComponentsSchema,
+  getCssContextSchema,
   getDesignTokensSchema,
   getExportPreviewSchema,
-  getCssContextSchema,
   getFileInfoSchema,
   getNodeTreeSchema,
-  getPageOutlineSchema,
   getRegionSchema,
   getScreenshotSchema,
   getSelectionContextSchema,
   getStylesSchema,
   inspectNodeSchema,
   listFramesSchema,
+  scanDesignSchema,
   searchNodesSchema
 } from './schemas.js';
 
@@ -281,21 +280,21 @@ export function registerTools(server: McpServer, session: PluginSession, config:
   );
 
   server.registerTool(
-    'get_coding_context',
+    'scan_design',
     {
-      title: 'Get Pixso coding context',
-      description: 'Primary Pixso design-to-implementation scan. Returns compact semantic regions, layout, spacing, typography, colors, repeated patterns, assets, criticalDimensions, fidelityChecklist/verificationTargets for browser DOM QA, factConfidence, a coverage report, and recommended next calls. The scan is widened automatically when the requested profile would truncate, so the returned facts are complete; check autoWidened and coverage. Do not use get_css_context before this.',
-      inputSchema: getCodingContextSchema,
+      title: 'Scan a Pixso design (overview)',
+      description: 'STEP 1 of design-to-code. Returns a compact overview of the selected frame: coverage, shape (region/text/depth counts), build plan (which region to fetch next), repeated patterns with componentization hints, a DOM verification contract, and ambiguities the caller should clarify before implementing. The payload is intentionally small (no full tree, typography details, or color palette) — fetch get_region for one region at a time when you need implementation data. This replaces the old get_coding_context/get_page_outline calls; do not assume those exist.',
+      inputSchema: scanDesignSchema,
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
-    async input => callPlugin(session, 'get_coding_context', input, codingContextTimeoutMs(input))
+    async input => callPlugin(session, 'scan_design', input, 60_000)
   );
 
   server.registerTool(
     'get_css_context',
     {
       title: 'Get Pixso CSS context',
-      description: 'Secondary CSS-focused drill-down. Use only after get_coding_context, or when the user explicitly asks for CSS rules/declarations. Returns compact grouped CSS facts plus criticalDimensions/productionGuidance for key nodes/patterns, not full design understanding.',
+      description: 'Secondary CSS-focused drill-down. Use only after scan_design, or when the user explicitly asks for CSS rules/declarations. Returns compact grouped CSS facts plus criticalDimensions/productionGuidance for key nodes/patterns, not full design understanding.',
       inputSchema: getCssContextSchema,
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
@@ -303,24 +302,13 @@ export function registerTools(server: McpServer, session: PluginSession, config:
   );
 
   server.registerTool(
-    'get_page_outline',
-    {
-      title: 'Get Pixso page outline',
-      description: 'STEP 1 of design-to-code. Returns the selected frame as an ordered list of build regions (header/sidebar/content/list/footer) with box-model-only facts, a build order, repeated-pattern hints, and a coverage report that explicitly lists anything that was NOT read. Start here instead of get_coding_context. Then implement region by region using get_region.',
-      inputSchema: getPageOutlineSchema,
-      annotations: { readOnlyHint: true, openWorldHint: false }
-    },
-    async input => callPlugin(session, 'get_page_outline', input, 90_000)
-  );
-
-  server.registerTool(
     'get_region',
     {
-      title: 'Get Pixso region detail',
-      description: 'STEP 2 of design-to-code. Returns ONE region in implementation detail: shell box model, per-child relative layout facts (main/cross axis sizing, flexGrow, alignSelf, offsetFromPrevious with a confidence tag), text/surface/asset facts, sub-regions, repeated patterns, and DOM verification checks. Call once per region listed by get_page_outline.',
+      title: 'Get one Pixso region (implementation detail)',
+      description: 'STEP 2 of design-to-code. Returns ONE region in implementation detail: shell box model, per-child relative layout facts (main/cross axis sizing, flexGrow, alignSelf, offsetFromPrevious) tagged with their source confidence, text/surface/asset facts, sub-regions, repeated patterns scoped to this region, and DOM verification checks. Call once per region listed by scan_design. Folding is on by default — identical siblings collapse to one exemplar plus variants, every member still listed in coversNodeIds.',
       inputSchema: getRegionSchema,
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
-    async input => callPlugin(session, 'get_region', input, 90_000)
+    async input => callPlugin(session, 'get_region', input, 60_000)
   );
 }

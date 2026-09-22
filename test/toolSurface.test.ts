@@ -40,13 +40,14 @@ async function listToolNames(): Promise<string[]> {
 }
 
 describe('MCP tool surface', () => {
-  it('exposes the region-first tools alongside the existing scan tools', async () => {
+  it('exposes only the two-tool design surface (scan_design + get_region) plus health', async () => {
     const names = await listToolNames();
-    expect(names).toContain('get_page_outline');
+    expect(names).toContain('scan_design');
     expect(names).toContain('get_region');
-    expect(names).toContain('get_coding_context');
     expect(names).toContain('get_css_context');
     expect(names).toContain('health');
+    expect(names).not.toContain('get_coding_context');
+    expect(names).not.toContain('get_page_outline');
   });
 
   it('requires a region node id so callers cannot request a whole page by accident', async () => {

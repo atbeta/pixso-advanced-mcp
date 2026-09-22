@@ -1,30 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod/v4';
-import { findRelatedFramesSchema, getCodingContextSchema, getCssContextSchema, getExportPreviewSchema, getPageOutlineSchema, getRegionSchema, getScreenshotSchema } from '../src/tools/schemas.js';
+import { findRelatedFramesSchema, getCssContextSchema, getExportPreviewSchema, getRegionSchema, getScreenshotSchema, scanDesignSchema } from '../src/tools/schemas.js';
 
 describe('tool schemas', () => {
-  it('exposes screenshot mode for get_coding_context', () => {
-    expect(getCodingContextSchema.includeScreenshot).toBeDefined();
-    expect(getCodingContextSchema.maxScreenshotWidth).toBeDefined();
-  });
-
-  it('exposes v0.4 performance controls for get_coding_context', () => {
-    expect(getCodingContextSchema.performanceProfile).toBeDefined();
-    expect(getCodingContextSchema.budgetMs).toBeDefined();
-    expect(getCodingContextSchema.includeVariables).toBeDefined();
-    expect(getCodingContextSchema.includeStyles).toBeDefined();
-    expect(getCodingContextSchema.maxTypographyVisitedNodes).toBeDefined();
-    expect(getCodingContextSchema.profile).toBeDefined();
-    expect(getCodingContextSchema.includeRawTree).toBeDefined();
-    expect(getCodingContextSchema.includeCssSummary).toBeDefined();
-  });
-
-  it('keeps expensive coding-context sections opt-in by default', () => {
-    const defaults = z.object(getCodingContextSchema).parse({});
-    expect(defaults.includeComponentHints).toBe(false);
-    expect(defaults.includeScreenshot).toBe('none');
-  });
-
   it('exposes find_related_frames controls', () => {
     expect(findRelatedFramesSchema.nodeId).toBeDefined();
     expect(findRelatedFramesSchema.maxResults).toBeDefined();
@@ -58,11 +36,10 @@ describe('tool schemas', () => {
     expect(defaults.contentsOnly).toBe(true);
   });
 
-  it('defaults the region-first tools to a bounded, build-ordered scan', () => {
-    const outline = z.object(getPageOutlineSchema).parse({});
-    expect(outline.maxDepth).toBe(6);
+  it('exposes the two-tool design surface: scan_design (overview) and get_region (detail)', () => {
+    const outline = z.object(scanDesignSchema).parse({});
     expect(outline.maxRegions).toBe(16);
-    expect(outline.subRegionsPerRegion).toBe(2);
+    expect(outline.maxDepth).toBe(8);
 
     const region = z.object(getRegionSchema).parse({ nodeId: '12:3' });
     expect(region.depth).toBe(5);

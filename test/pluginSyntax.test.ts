@@ -18,6 +18,7 @@ describe('Pixso plugin bundle', () => {
     expect(source).toContain('sourceConfidence');
     expect(source).toContain('implementationConfidence');
     expect(source).toContain('getCssContext');
-    expect(source).toContain('get_coding_context is the primary design scan');
+    expect(source).toContain('scan_design is the primary design scan');
+    expect(source).toContain('scan_design');
   });
 });

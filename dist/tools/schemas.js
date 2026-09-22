@@ -140,14 +140,13 @@ export const findRelatedFramesSchema = {
     includeHidden: z.boolean().default(false),
     maxResults: z.number().int().min(1).max(200).default(30)
 };
-export const getPageOutlineSchema = {
+export const scanDesignSchema = {
     nodeId: z.string().optional().describe('Root frame/node id. Defaults to the first selected node.'),
-    maxDepth: z.number().int().min(1).max(10).default(6).describe('Traversal depth used when reading nested structure. Content truncated below this depth is reported in coverage.'),
-    maxRegions: z.number().int().min(2).max(40).default(16).describe('Maximum number of primary regions returned.'),
-    subRegionsPerRegion: z.number().int().min(0).max(8).default(2).describe('How many direct sub-regions to preview per primary region.')
+    maxRegions: z.number().int().min(2).max(40).default(16).describe('Maximum number of primary regions surfaced in the overview.'),
+    maxDepth: z.number().int().min(1).max(12).default(8).describe('Traversal depth used when reading nested structure. Truncation is reported in coverage.')
 };
 export const getRegionSchema = {
-    nodeId: z.string().describe('Region node id taken from get_page_outline.'),
+    nodeId: z.string().describe('Region node id taken from scan_design.'),
     depth: z.number().int().min(1).max(12).default(5).describe('Traversal depth inside the region. Truncation is reported in coverage.'),
     includeChildren: z.boolean().default(true).describe('Include per-child relative layout and content facts.'),
     includeContract: z.boolean().default(true).describe('Include browser/DOM verification checks for this region.'),
