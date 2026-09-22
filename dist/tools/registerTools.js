@@ -176,7 +176,7 @@ export function registerTools(server, session, config) {
     }, async (input) => callPlugin(session, 'find_related_frames', input));
     server.registerTool('get_coding_context', {
         title: 'Get Pixso coding context',
-        description: 'Primary Pixso design-to-implementation scan. Use this first when the user asks to implement UI from a selected Pixso frame. Returns compact semantic regions, layout, spacing, typography, colors, repeated patterns, assets, criticalDimensions, fidelityChecklist/verificationTargets for browser DOM QA, quality warnings, and recommended next calls. Do not use get_css_context before this.',
+        description: 'Primary Pixso design-to-implementation scan. Returns compact semantic regions, layout, spacing, typography, colors, repeated patterns, assets, criticalDimensions, fidelityChecklist/verificationTargets for browser DOM QA, factConfidence, a coverage report, and recommended next calls. The scan is widened automatically when the requested profile would truncate, so the returned facts are complete; check autoWidened and coverage. Do not use get_css_context before this.',
         inputSchema: getCodingContextSchema,
         annotations: { readOnlyHint: true, openWorldHint: false }
     }, async (input) => callPlugin(session, 'get_coding_context', input, codingContextTimeoutMs(input)));

@@ -35,7 +35,7 @@
   const CODING_CONTEXT_VERSION = '0.4';
   const CSS_CONTEXT_VERSION = '0.4';
   const CODING_PROFILE_DEFAULTS = {
-    compact: { detail: 'compact', performanceProfile: 'fast', budgetMs: 9000, maxNodes: 260, maxTextChars: 2500, maxTypographyVisitedNodes: 2400, maxComponentResults: 80, maxBytes: 40000, treeDepth: 4, treeDetail: 'summary' },
+    compact: { detail: 'compact', performanceProfile: 'fast', budgetMs: 9000, maxNodes: 600, maxTextChars: 2500, maxTypographyVisitedNodes: 2400, maxComponentResults: 80, maxBytes: 40000, treeDepth: 6, treeDetail: 'summary' },
     balanced: { detail: 'balanced', performanceProfile: 'balanced', budgetMs: 16000, maxNodes: 520, maxTextChars: 5000, maxTypographyVisitedNodes: 4500, maxComponentResults: 160, maxBytes: 120000, treeDepth: 5, treeDetail: 'full' },
     deep: { detail: 'deep', performanceProfile: 'deep', budgetMs: 30000, maxNodes: 1200, maxTextChars: 12000, maxTypographyVisitedNodes: 9000, maxComponentResults: 300, maxBytes: 300000, treeDepth: 8, treeDetail: 'full' },
     verbose: { detail: 'deep', performanceProfile: 'deep', budgetMs: 60000, maxNodes: 2500, maxTextChars: 20000, maxTypographyVisitedNodes: 16000, maxComponentResults: 500, maxBytes: 1000000, treeDepth: 10, treeDetail: 'full' }
@@ -428,16 +428,94 @@
   }
 
   async function getCodingContext(input) {
-    const node = await resolveNodeOrSelection(input.nodeId);
-    const options = normalizeCodingContextOptions(input || {});
-    const performance = createPerformanceTracker(options.performanceProfile, options.budgetMs);
-    const snapshot = await buildFrameSnapshot(node, options, performance, 'coding');
-    const response = compileCodingContext(snapshot, input || {});
-    return applyOutputBudget(response, options.maxBytes, {
+    const request = input || {};
+    const node = await resolveNodeOrSelection(request.nodeId);
+    const requestedOptions = normalizeCodingContextOptions(request);
+
+    // Default to a complete, untruncated scan. A partial scan is worse than a slightly
+    // more expensive one: callers cannot implement from data that is silently missing.
+    // Only an explicit allowPartial turns this off.
+    const allowPartial = request.allowPartial === true;
+    const options = allowPartial
+      ? requestedOptions
+      : widenCodingOptions(requestedOptions, request);
+    const autoWidened = !allowPartial && widenedDiff(requestedOptions, options).length
+      ? {
+          requestedProfile: requestedOptions.profile,
+          requestedDepth: requestedOptions.treeDepth,
+          usedProfile: options.profile,
+          usedDepth: options.treeDepth,
+          reason: 'The scan was widened so the returned design facts are complete and not silently truncated.'
+        }
+      : null;
+
+    const snapshot = await buildFrameSnapshot(node, options, createPerformanceTracker(options.performanceProfile, options.budgetMs), 'coding');
+    const coverage = buildCoverageReport(snapshot);
+
+    const response = compileCodingContext(snapshot, request);
+    const finalResponse = applyOutputBudget(response, options.maxBytes, {
       profile: options.profile,
       primarySections: ['screen', 'quality', 'nodeIndex', 'regions', 'patterns', 'criticalDimensions', 'verificationTargets', 'fidelityChecklist', 'productionGuidance', 'typography', 'colors', 'assets', 'cssSummary', 'nextRecommendedCalls'],
       soft: options.profile !== 'verbose'
     });
+
+    const outputTruncated = Boolean(finalResponse.budget && finalResponse.budget.truncated);
+    finalResponse.coverage = outputTruncated
+      ? {
+        ...coverage,
+        outputTruncated: true,
+        complete: false,
+        note: 'The response exceeded maxBytes and whole sections were dropped. Re-run with a higher maxBytes or narrower scope.'
+      }
+      : coverage;
+    finalResponse.factConfidence = buildFactConfidence(snapshot);
+    if (autoWidened) finalResponse.autoWidened = autoWidened;
+    if (!finalResponse.coverage.complete) {
+      finalResponse.warnings = Array.from(new Set([
+        ...(finalResponse.warnings || []),
+        allowPartial
+          ? 'The scan is incomplete and allowPartial was set, so partial facts were returned on purpose.'
+          : 'The scan is still incomplete even after widening; regions and patterns were derived from a partial tree. Check coverage before implementing.'
+      ]));
+    }
+    return finalResponse;
+  }
+
+  function widenCodingOptions(options, request) {
+    const raw = request || {};
+    // Profile-derived limits are widened so the default call returns a complete,
+    // untruncated design scan. Explicit numeric ceilings are still honored.
+    const widened = {
+      ...options,
+      profile: 'deep',
+      detail: 'deep',
+      performanceProfile: 'deep',
+      treeDepth: 12,
+      treeDetail: 'full',
+      includeText: true,
+      includeLayoutAnalysis: true,
+      includeRepeatedPatterns: true,
+      includeAssets: true,
+      includeScreenshot: 'none',
+      maxNodes: 3000,
+      maxTextChars: 8000,
+      maxTypographyVisitedNodes: 20000,
+      budgetMs: 60000,
+      maxBytes: 1000000
+    };
+    if (raw.budgetMs != null) widened.budgetMs = options.budgetMs;
+    if (raw.maxNodes != null) widened.maxNodes = options.maxNodes;
+    if (raw.maxTextChars != null) widened.maxTextChars = options.maxTextChars;
+    if (raw.maxTypographyVisitedNodes != null) widened.maxTypographyVisitedNodes = options.maxTypographyVisitedNodes;
+    if (raw.maxBytes != null) widened.maxBytes = options.maxBytes;
+    return widened;
+  }
+
+  function widenedDiff(before, after) {
+    const keys = ['profile', 'detail', 'performanceProfile', 'treeDepth', 'treeDetail', 'maxNodes', 'maxTextChars', 'maxTypographyVisitedNodes', 'budgetMs', 'maxBytes'];
+    const changed = [];
+    for (const key of keys) if (before[key] !== after[key]) changed.push(key);
+    return changed;
   }
 
   async function buildFrameSnapshot(node, options, performance, purpose) {
@@ -554,7 +632,6 @@
     const cssSummary = options.includeCssSummary === false ? undefined : buildCssSummary(snapshot);
     const nextRecommendedCalls = buildNextRecommendedCallsV4(snapshot, cssSummary);
     const implementationSpec = buildImplementationSpecV4(snapshot);
-    const coverage = buildCoverageReport(snapshot);
     const response = clean({
       version: CODING_CONTEXT_VERSION,
       screen: {
@@ -574,8 +651,6 @@
       extractionQuality: snapshot.quality,
       performance: snapshot.performance,
       budget: buildBudgetReport(snapshot, undefined),
-      coverage,
-      factConfidence: buildFactConfidence(snapshot),
       nodeIndex: snapshot.nodeIndex,
       regions: snapshot.semanticRegions,
       patterns: snapshot.patterns,
@@ -615,10 +690,7 @@
         'Hover, focus, pressed, disabled, loading, empty and error states are only known if present as frames/components in Pixso.',
         'Prefer project UI-kit/icons when available; exported Pixso assets are a fallback, not a mandatory implementation choice.'
       ],
-      warnings: Array.from(new Set([
-        ...(snapshot.warnings || []),
-        coverage.complete ? undefined : 'This scan is incomplete: regions and patterns were derived from a partial tree. Check coverage before implementing.'
-      ].filter(Boolean)))
+      warnings: snapshot.warnings
     });
     if (response.assets) {
       if (!Array.isArray(response.assets.exportQueue)) response.assets.exportQueue = [];
@@ -3795,7 +3867,7 @@
 
       if (!CONTAINER_TYPES.has(node.type)) continue;
       if (level >= scanDepth) {
-        skippedByDepth += childrenOf(node).length;
+        skippedByDepth += countDescendants(node, () => true, 20000);
         continue;
       }
 
@@ -3850,13 +3922,13 @@
   }
 
   function typographyDepthForDetail(detail) {
-    if (detail === 'compact') return 5;
+    if (detail === 'compact') return 8;
     if (detail === 'deep') return 12;
     return 9;
   }
 
   function typographyLimitForDetail(detail) {
-    if (detail === 'compact') return 60;
+    if (detail === 'compact') return 150;
     if (detail === 'deep') return 500;
     return 200;
   }

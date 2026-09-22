@@ -154,6 +154,7 @@ export declare const getCodingContextSchema: {
     includeFullPaths: z.ZodDefault<z.ZodBoolean>;
     includeGeometryDetails: z.ZodDefault<z.ZodBoolean>;
     maxBytes: z.ZodOptional<z.ZodNumber>;
+    allowPartial: z.ZodDefault<z.ZodBoolean>;
     maxNodes: z.ZodDefault<z.ZodNumber>;
     maxTextChars: z.ZodDefault<z.ZodNumber>;
     maxTypographyVisitedNodes: z.ZodOptional<z.ZodNumber>;

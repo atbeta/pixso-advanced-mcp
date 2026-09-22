@@ -496,7 +496,7 @@ function createPluginHarness() {
 }
 
 describe('Pixso plugin extraction behavior', () => {
-  it('collects nested typography in balanced mode and preserves percent letter spacing precision', async () => {
+  it('widens a tight scan automatically so callers do not have to remember to pass deep', async () => {
     const { callPlugin } = createPluginHarness();
     const result = await callPlugin('get_coding_context', {
       detail: 'balanced',
@@ -507,14 +507,35 @@ describe('Pixso plugin extraction behavior', () => {
       maxTextChars: 1000
     });
 
+    // maxNodes: 100 is honored as a hard ceiling, but the scan is widened
+    // so that depth and typography cover what the tree misses.
+    expect(result.autoWidened).toBeDefined();
+    expect(result.autoWidened.usedProfile).toBe('deep');
+    expect(result.coverage.complete).toBe(true);
+    expect(result.typography.textNodes[0].css.letterSpacing).toBe('-0.02em');
+    expect(result.typography.textNodes[0].raw.letterSpacing.value).toBeCloseTo(-1.999999955);
+  });
+
+  it('honors allowPartial when the caller explicitly wants a tight scan', async () => {
+    const { callPlugin } = createPluginHarness();
+    const result = await callPlugin('get_coding_context', {
+      detail: 'balanced',
+      includeAssets: false,
+      includeTokens: false,
+      includeComponentHints: false,
+      maxNodes: 100,
+      maxTextChars: 1000,
+      allowPartial: true
+    });
+
+    expect(result.autoWidened).toBeUndefined();
     expect(result.stats.layoutTextNodeCount).toBe(0);
     expect(result.typography.coverage.textNodesFound).toBe(1);
     expect(result.typography.coverage.layoutTreeMissedText).toBe(true);
     expect(result.typography.coverage.guidance.notes).toEqual(expect.arrayContaining([
       'Text was found by the dedicated typography pass but not in the bounded layout tree.'
     ]));
-    expect(result.typography.textNodes[0].css.letterSpacing).toBe('-0.02em');
-    expect(result.typography.textNodes[0].raw.letterSpacing.value).toBeCloseTo(-1.999999955);
+    expect(result.warnings.join(' ')).toContain('allowPartial');
   });
 
   it('marks overlapping child measurements so negative gaps are not used as CSS gaps', async () => {
@@ -607,7 +628,7 @@ describe('Pixso plugin extraction behavior', () => {
   });
 
 
-  it('returns compact primary coding context without raw tree and points CSS to secondary drill-down', async () => {
+  it('returns a complete coding context by default and reports autoWidened when compact would truncate', async () => {
     const { callPlugin } = createPluginHarness();
     const result = await callPlugin('get_coding_context', {
       profile: 'compact',
@@ -618,7 +639,10 @@ describe('Pixso plugin extraction behavior', () => {
     });
 
     expect(result.version).toBe('0.4');
-    expect(result.profile).toBe('compact');
+    // profile reflects the effective (widened) profile so callers can trust the payload is complete.
+    expect(result.profile).toBe('deep');
+    expect(result.autoWidened).toEqual(expect.objectContaining({ requestedProfile: 'compact', usedProfile: 'deep' }));
+    expect(result.coverage.complete).toBe(true);
     expect(result.layout.tree).toBeUndefined();
     expect(result.layout.rawTreeOmitted).toBe(true);
     expect(result.nodeIndex).toBeDefined();
@@ -627,6 +651,22 @@ describe('Pixso plugin extraction behavior', () => {
     expect(result.cssSummary.recommendedCall.args.guidanceProfile).toBe('agent');
     expect(result.nextRecommendedCalls[0]).toEqual(expect.objectContaining({ tool: 'get_css_context' }));
     expect(result.nextRecommendedCalls[0].args.guidanceProfile).toBe('agent');
+  });
+
+  it('keeps the tight profile when allowPartial is set, even though data may still be partial', async () => {
+    const { callPlugin } = createPluginHarness();
+    const result = await callPlugin('get_coding_context', {
+      profile: 'compact',
+      includeAssets: true,
+      includeTokens: false,
+      includeComponentHints: false,
+      maxNodes: 10,
+      allowPartial: true
+    });
+
+    expect(result.autoWidened).toBeUndefined();
+    expect(result.profile).toBe('compact');
+    expect(result.warnings.join(' ')).toContain('allowPartial');
   });
 
   it('returns compact CSS as key rules plus duplicate rule groups with alias selectors', async () => {
@@ -1306,16 +1346,14 @@ describe('Pixso batch 2: fidelity and size', () => {
     expect(JSON.stringify(folded).length).toBeLessThan(JSON.stringify(unfolded).length);
   });
 
-  it('counts depth truncation in get_coding_context coverage instead of hiding it', async () => {
+  it('returns a complete scan by default even when the caller asks for compact', async () => {
     const { callPlugin } = createPluginHarness();
-    const result = await callPlugin('get_coding_context', { detail: 'compact', maxNodes: 100, maxTextChars: 500 });
+    const result = await callPlugin('get_coding_context', { detail: 'compact', maxTextChars: 500 });
 
     expect(result.coverage).toBeDefined();
-    expect(result.coverage.totalNodes).toBeGreaterThan(0);
-    expect(result.coverage.complete).toBe(false);
-    expect(result.coverage.depthLimited).toBeDefined();
-    expect(result.coverage.depthLimited.nodeCount).toBeGreaterThan(0);
-    expect(result.warnings.join(' ')).toContain('incomplete');
+    expect(result.coverage.complete).toBe(true);
+    expect(result.coverage.depthLimited).toBeUndefined();
+    expect(result.factConfidence).toBeDefined();
   });
 
   it('reports a complete coverage block for a fully scanned frame', async () => {
@@ -1348,5 +1386,46 @@ describe('Pixso batch 2: fidelity and size', () => {
     for (const item of result.children.items) {
       expect(item.layout.confidence).toMatch(/^(fromAutoLayout|measured-bounds)$/);
     }
+  });
+});
+
+describe('Pixso instance text fidelity (the original user complaint)', () => {
+  it('reads text inside component instances even when the caller asks for compact', async () => {
+    const { callPlugin, fixture } = createPluginHarness();
+
+    // Build a deep frame whose only text lives inside an INSTANCE at depth 5.
+    // Distinguishing labels so we can assert they actually come from this subtree.
+    const instanceChildren = [
+      createNode({ id: 'instance-on-text', type: 'TEXT', name: 'On', characters: 'LABEL-ON-8831', width: 30, height: 14 }),
+      createNode({ id: 'instance-off-text', type: 'TEXT', name: 'Off', characters: 'LABEL-OFF-8832', width: 30, height: 14 })
+    ];
+    const toggle = createNode({
+      id: 'toggle-instance',
+      type: 'INSTANCE',
+      name: 'Toggle Button',
+      width: 80,
+      height: 32,
+      children: instanceChildren
+    });
+    let deep = toggle;
+    for (let i = 4; i >= 1; i -= 1) {
+      deep = createNode({ id: `instance-deep-${i}`, type: 'FRAME', name: `Wrapper ${i}`, width: 200, height: 80, children: [deep] });
+    }
+    const instFrame = createNode({ id: 'instance-frame', type: 'FRAME', name: 'Toggle Group', width: 240, height: 120, children: [deep] });
+    fixture.page.children.push(instFrame);
+
+    const compact = await callPlugin('get_coding_context', { nodeId: 'instance-frame', detail: 'compact', maxTextChars: 2000 });
+    expect(compact.coverage.complete).toBe(true);
+    expect(JSON.stringify(compact)).toContain('LABEL-ON-8831');
+    expect(JSON.stringify(compact)).toContain('LABEL-OFF-8832');
+
+    const region = await callPlugin('get_region', { nodeId: 'toggle-instance', depth: 3 });
+    const texts = region.children.items.filter(item => item.type === 'TEXT').map(item => item.content && item.content.text && item.content.text.value);
+    expect(texts).toEqual(expect.arrayContaining(['LABEL-ON-8831', 'LABEL-OFF-8832']));
+
+    const partial = await callPlugin('get_coding_context', { nodeId: 'instance-frame', detail: 'compact', maxTextChars: 2000, allowPartial: true });
+    expect(partial.autoWidened).toBeUndefined();
+    expect(partial.profile).toBe('compact');
+    expect(partial.warnings.join(' ')).toContain('allowPartial');
   });
 });

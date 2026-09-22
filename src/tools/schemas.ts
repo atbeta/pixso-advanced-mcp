@@ -101,7 +101,7 @@ export const getExportPreviewSchema = {
 
 export const getCodingContextSchema = {
   nodeId: z.string().optional().describe('Screen/frame node id. Defaults to the first selected node.'),
-  profile: z.enum(['compact', 'balanced', 'deep', 'verbose']).default('compact').describe('Output profile. compact is the Codex default; balanced/deep/verbose are opt-in.'),
+  profile: z.enum(['compact', 'balanced', 'deep', 'verbose']).default('compact').describe('Requested output profile. This is a preference, not a truncation switch: when a shorter profile would return a partial scan, the bridge widens the scan automatically and reports autoWidened. Set allowPartial=true to keep the tight scan.'),
   detail: z.enum(['compact', 'balanced', 'deep', 'verbose']).optional().describe('Deprecated alias for profile. Kept for compatibility.'),
   performanceProfile: z.enum(['fast', 'balanced', 'deep']).optional().describe('Extraction budget preset. Defaults from profile.'),
   budgetMs: z.number().int().min(500).max(120000).optional().describe('Soft extraction budget. Optional sections are skipped when the budget is nearly exhausted.'),
@@ -120,6 +120,7 @@ export const getCodingContextSchema = {
   includeFullPaths: z.boolean().default(false).describe('Include full Pixso paths in compact node index. Defaults to path tails only.'),
   includeGeometryDetails: z.boolean().default(false).describe('Include larger geometry/debug details. Defaults to compact bounds only.'),
   maxBytes: z.number().int().min(8000).max(1000000).optional().describe('Soft output budget in bytes. Compact defaults to about 40 KB.'),
+  allowPartial: z.boolean().default(false).describe('Opt in to a deliberately partial scan. By default an incomplete scan is widened automatically instead of being returned.'),
   maxNodes: z.number().int().min(50).max(3000).default(500),
   maxTextChars: z.number().int().min(0).max(50000).default(8000),
   maxTypographyVisitedNodes: z.number().int().min(100).max(20000).optional(),
