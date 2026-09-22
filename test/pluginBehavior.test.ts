@@ -1197,3 +1197,80 @@ describe('Pixso plugin extraction behavior', () => {
     }
   });
 });
+
+describe('Pixso region-first delivery', () => {
+  it('returns a build-ordered outline with an explicit coverage report', async () => {
+    const { callPlugin } = createPluginHarness();
+    const result = await callPlugin('get_page_outline', {});
+    expect(result.kind).toBe('page-outline');
+    expect(result.root.nodeId).toBe('screen');
+    expect(result.coverage.totalNodes).toBeGreaterThan(0);
+    expect(result.coverage.complete).toBe(true);
+    expect(result.regions).toHaveLength(3);
+    expect(result.buildOrder[0].kind).toBe('shell');
+    expect(result.buildOrder.slice(1).map(step => step.kind)).toEqual(['region', 'region', 'region']);
+    expect(result.next.tool).toBe('get_region');
+    expect(result.next.args.nodeId).toBe(result.regions[0].nodeId);
+    expect(result.regions.every(region => typeof region.buildHint === 'string')).toBe(true);
+  });
+
+  it('orders primary regions so the build order follows the page', async () => {
+    const { callPlugin } = createPluginHarness();
+    const result = await callPlugin('get_page_outline', {});
+    expect(result.regions[0].nodeId).toBe('nested-1');
+    expect(result.regions.map(region => region.nodeId)).toEqual(['nested-1', 'canvas', 'search-icon']);
+  });
+
+  it('reports depth truncation in coverage instead of hiding it', async () => {
+    const { callPlugin } = createPluginHarness();
+    const shallow = await callPlugin('get_page_outline', { maxDepth: 1 });
+    expect(shallow.coverage.complete).toBe(false);
+    expect(shallow.coverage.depthLimited).toBeDefined();
+    expect(shallow.coverage.depthLimited.nodeCount).toBeGreaterThan(0);
+    expect(shallow.coverage.depthLimited.note).toContain('was not read');
+    expect(shallow.warnings.join(' ')).toContain('coverage is incomplete');
+  });
+
+  it('returns per-child relative layout facts with a source confidence tag', async () => {
+    const { callPlugin } = createPluginHarness();
+    const result = await callPlugin('get_region', { nodeId: 'screen', depth: 6 });
+    expect(result.kind).toBe('region');
+    expect(result.region.nodeId).toBe('screen');
+    expect(result.shell.display).toBeDefined();
+    expect(result.coverage.complete).toBe(true);
+    expect(result.children.count).toBe(3);
+    const items = result.children.items;
+    expect(items).toHaveLength(3);
+    expect(items[0].layout.order).toBe(0);
+    expect(items[0].layout.offsetFromPrevious).toEqual({ dx: 0, dy: 0 });
+    expect(items[1].layout.order).toBe(1);
+    expect(items[0].layout.sizing.mainAxis).toBe('hug-or-fixed');
+    expect(items[0].layout.confidence).toBe('measured-bounds');
+    expect(items[0].content).toBeDefined();
+  });
+
+  it('flags an under-scanned region instead of implying it is complete', async () => {
+    const { callPlugin } = createPluginHarness();
+    const shallow = await callPlugin('get_region', { nodeId: 'screen', depth: 2 });
+    expect(shallow.coverage.complete).toBe(false);
+    expect(shallow.coverageNote).toContain('not fully read');
+  });
+
+  it('surfaces DOM verification checks for a region', async () => {
+    const { callPlugin } = createPluginHarness();
+    const result = await callPlugin('get_region', { nodeId: 'screen', depth: 6, includeContract: true });
+    expect(Array.isArray(result.contract)).toBe(true);
+    for (const entry of result.contract) {
+      expect(Array.isArray(entry.checks)).toBe(true);
+      expect(entry.nodeId).toBeDefined();
+    }
+  });
+
+  it('allows disabling children and contract independently', async () => {
+    const { callPlugin } = createPluginHarness();
+    const result = await callPlugin('get_region', { nodeId: 'screen', includeChildren: false, includeContract: false });
+    expect(result.children).toBeUndefined();
+    expect(result.contract).toBeUndefined();
+    expect(result.shell).toBeDefined();
+  });
+});

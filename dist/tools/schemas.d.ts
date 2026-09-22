@@ -217,3 +217,17 @@ export declare const findRelatedFramesSchema: {
     includeHidden: z.ZodDefault<z.ZodBoolean>;
     maxResults: z.ZodDefault<z.ZodNumber>;
 };
+export declare const getPageOutlineSchema: {
+    nodeId: z.ZodOptional<z.ZodString>;
+    maxDepth: z.ZodDefault<z.ZodNumber>;
+    maxRegions: z.ZodDefault<z.ZodNumber>;
+    subRegionsPerRegion: z.ZodDefault<z.ZodNumber>;
+};
+export declare const getRegionSchema: {
+    nodeId: z.ZodString;
+    depth: z.ZodDefault<z.ZodNumber>;
+    includeChildren: z.ZodDefault<z.ZodBoolean>;
+    includeContract: z.ZodDefault<z.ZodBoolean>;
+    maxChildren: z.ZodDefault<z.ZodNumber>;
+    maxTextChars: z.ZodDefault<z.ZodNumber>;
+};

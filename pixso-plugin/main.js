@@ -20,7 +20,7 @@
   const VECTOR_TYPES = new Set(['VECTOR', 'BOOLEAN_OPERATION', 'STAR', 'POLYGON', 'LINE']);
   const ASSET_NAME_RE = /icon|logo|image|img|photo|picture|avatar|illustration|asset|svg|png|jpg|jpeg|banner|background|bg/i;
   const EXPORT_QUEUE_ACTIONS = new Set(['export-svg', 'export-png', 'inspect-node']);
-  const HEAVY_COMMANDS = new Set(['get_coding_context', 'get_css_context', 'get_screenshot', 'export_asset']);
+  const HEAVY_COMMANDS = new Set(['get_coding_context', 'get_css_context', 'get_screenshot', 'export_asset', 'get_page_outline', 'get_region']);
   const EXPORT_TIMEOUT_MS = 15000;
   const EXPORT_COMPLEXITY_LIMITS = {
     maxPreviewNodes: 600,
@@ -117,6 +117,8 @@
       case 'find_related_frames': return findRelatedFrames(input);
       case 'get_coding_context': return getCodingContext(input);
       case 'get_css_context': return getCssContext(input);
+      case 'get_page_outline': return getPageOutline(input);
+      case 'get_region': return getRegion(input);
       default: throw new Error('Unknown Pixso Advanced MCP command: ' + command);
     }
   }
@@ -618,6 +620,419 @@
     if (!Array.isArray(response.assetRequests)) response.assetRequests = [];
     response.budget = buildBudgetReport(snapshot, response);
     return response;
+  }
+
+  // ---- Region-first delivery: page outline + region scope ----
+
+  function countAllNodes(root) {
+    let count = 0;
+    const stack = childrenOf(root).slice();
+    while (stack.length) {
+      const node = stack.pop();
+      if (!node) continue;
+      if (safeGet(node, 'visible', true) === false) continue;
+      count += 1;
+      for (const child of childrenOf(node)) stack.push(child);
+    }
+    return count;
+  }
+
+  function countSerializedDescendants(node) {
+    let count = 0;
+    const stack = Array.isArray(node && node.children) ? node.children.slice() : [];
+    while (stack.length) {
+      const item = stack.pop();
+      if (!item) continue;
+      count += 1;
+      if (Array.isArray(item.children)) for (const child of item.children) stack.push(child);
+    }
+    return count;
+  }
+
+  function countSerializedByType(node, type) {
+    let count = 0;
+    const stack = node ? [node] : [];
+    while (stack.length) {
+      const item = stack.pop();
+      if (!item) continue;
+      if (item.type === type) count += 1;
+      if (Array.isArray(item.children)) for (const child of item.children) stack.push(child);
+    }
+    return count;
+  }
+
+  function collectTreeTruncations(tree) {
+    const maxNodes = [];
+    const depth = [];
+    const stack = tree ? [tree] : [];
+    while (stack.length) {
+      const node = stack.pop();
+      if (!node) continue;
+      if (node.truncation) {
+        const omitted = node.truncation.omittedChildrenCount != null ? node.truncation.omittedChildrenCount : 1;
+        const entry = { nodeId: node.id, name: node.name, reason: node.truncation.reason, omitted };
+        if (node.truncation.reason === 'maxNodes reached') maxNodes.push(entry);
+        else if (node.truncation.reason === 'depth limit reached') depth.push(entry);
+      }
+      if (Array.isArray(node.children)) for (const child of node.children) stack.push(child);
+    }
+    return { maxNodes, depth };
+  }
+
+  function buildCoverageReport(snapshot) {
+    const trueTotal = countAllNodes(snapshot.rootNode);
+    const scanned = snapshot.treeResult ? snapshot.treeResult.nodeCount || 0 : 0;
+    const truncations = collectTreeTruncations(snapshot.tree);
+    const depthOmitted = truncations.depth.reduce((sum, item) => sum + (item.omitted || 0), 0);
+    const unresolved = Math.max(0, trueTotal - scanned);
+    const complete = unresolved === 0 && depthOmitted === 0 && truncations.maxNodes.length === 0;
+    return clean({
+      rootNodeId: snapshot.rootNode.id,
+      totalNodes: trueTotal,
+      scannedNodes: scanned,
+      unresolvedNodes: unresolved,
+      percent: trueTotal ? roundNumber(((trueTotal - unresolved) / trueTotal) * 100) : 100,
+      complete,
+      depthLimited: depthOmitted ? {
+        nodeCount: depthOmitted,
+        nodes: truncations.depth.slice(0, 12),
+        note: 'Nested content below the scan depth was not read. Raise depth or scan the affected region directly.'
+      } : undefined,
+      budgetLimited: truncations.maxNodes.length ? {
+        nodeCount: truncations.maxNodes.length,
+        nodes: truncations.maxNodes.slice(0, 12),
+        note: 'maxNodes was reached. Scan region by region instead of raising the global budget.'
+      } : undefined
+    });
+  }
+
+  function regionShellFacts(node, spacing) {
+    const layout = node && node.layout ? node.layout : {};
+    const auto = Boolean(layout.layoutMode && layout.layoutMode !== 'NONE');
+    const measured = spacing && spacing.measured ? spacing.measured : {};
+    const overlap = measured.gapReliability === 'overlap-detected';
+    const pattern = spacing && spacing.detectedPattern;
+    return clean({
+      model: auto ? 'auto-layout-' + String(layout.layoutMode).toLowerCase() : pattern || 'freeform',
+      display: auto ? 'flex' : pattern === 'grid-or-wrapped-list' ? 'grid' : 'block',
+      direction: layout.layoutMode === 'HORIZONTAL' ? 'row' : layout.layoutMode === 'VERTICAL' ? 'column' : undefined,
+      gap: auto ? layout.itemSpacing : overlap ? undefined : measured.rowGap != null ? measured.rowGap : undefined,
+      counterGap: auto ? layout.counterAxisSpacing : overlap ? undefined : measured.columnGap != null ? measured.columnGap : undefined,
+      padding: layout.padding,
+      align: clean({ primary: layout.primaryAxisAlignItems, counter: layout.counterAxisAlignItems }),
+      sizing: clean({ primary: layout.primaryAxisSizingMode, counter: layout.counterAxisSizingMode }),
+      wrap: layout.layoutWrap,
+      childCount: spacing && spacing.childCount != null ? spacing.childCount : Array.isArray(node && node.children) ? node.children.length : 0,
+      contentBox: contentBoxForSerializedNode(node),
+      css: (spacing && spacing.cssSuggestion) || layout.cssHint,
+      confidence: auto ? 'fromAutoLayout' : 'measured',
+      warning: overlap ? 'Overlapping children detected; do not translate measured negative gaps into CSS gap/margin.' : undefined
+    });
+  }
+
+  function childRelativeFacts(child, parent, index, previous) {
+    const layout = child && child.layout ? child.layout : {};
+    const parentLayout = parent && parent.layout ? parent.layout : {};
+    const parentAuto = Boolean(parentLayout.layoutMode && parentLayout.layoutMode !== 'NONE');
+    const escapesAutoLayout = parentAuto && layout.layoutPositioning === 'ABSOLUTE';
+    const grow = layout.layoutGrow;
+    const alignSelf = layout.layoutAlign && layout.layoutAlign !== 'INHERIT' ? String(layout.layoutAlign).toLowerCase() : undefined;
+    const bounds = child && child.bounds ? child.bounds : {};
+    const prev = previous && previous.bounds ? previous.bounds : null;
+    return clean({
+      order: index,
+      sizing: {
+        mainAxis: grow === 1 ? 'fill' : 'hug-or-fixed',
+        crossAxis: alignSelf === 'stretch' ? 'fill' : alignSelf
+      },
+      flexGrow: grow === 1 ? 1 : undefined,
+      alignSelf,
+      escapesAutoLayout: escapesAutoLayout ? true : undefined,
+      offsetFromPrevious: {
+        dx: roundNumber((bounds.x || 0) - (prev ? prev.x || 0 : 0)),
+        dy: roundNumber((bounds.y || 0) - (prev ? prev.y || 0 : 0))
+      },
+      confidence: parentAuto && !escapesAutoLayout ? 'fromAutoLayout' : 'measured-bounds'
+    });
+  }
+
+  function childContentFacts(child) {
+    const text = child && child.type === 'TEXT' && child.text ? clean({
+      value: child.text.characters || child.text.preview,
+      fontSize: child.text.fontSize,
+      fontName: child.text.fontName,
+      lineHeight: child.text.lineHeight,
+      letterSpacing: child.text.letterSpacing,
+      align: child.text.textAlignHorizontal,
+      role: child.text.roleGuess,
+      css: child.text.css
+    }) : undefined;
+    const component = child && child.component ? clean({
+      mainComponentId: child.component.mainComponentId,
+      mainComponentName: child.component.mainComponentName
+    }) : undefined;
+    return clean({
+      text,
+      surface: compactSurfaceFact(child),
+      asset: child && child.assets && (child.assets.assetExport || child.assets.kind) ? clean({
+        kind: child.assets.kind,
+        confidence: child.assets.confidence,
+        recommendedAction: child.assets.recommendedAction
+      }) : undefined,
+      component
+    });
+  }
+
+  function describeRegionChildren(node, aliases, maxChildren) {
+    const children = (Array.isArray(node && node.children) ? node.children : []).filter(child => child && child.bounds);
+    const items = [];
+    let previous = null;
+    for (let index = 0; index < children.length && index < maxChildren; index += 1) {
+      const child = children[index];
+      items.push(clean({
+        nodeId: child.id,
+        alias: aliases.get(child.id) || undefined,
+        name: child.name,
+        type: child.type,
+        role: compactRoleGuess(child),
+        isContainer: Boolean(Array.isArray(child.children) && child.children.length),
+        size: { width: roundNumber(child.bounds && child.bounds.width), height: roundNumber(child.bounds && child.bounds.height) },
+        layout: childRelativeFacts(child, node, index, previous),
+        content: childContentFacts(child)
+      }));
+      previous = child;
+    }
+    return clean({ count: children.length, shown: items.length, items });
+  }
+
+  function regionKeyFor(node) {
+    const role = String(compactRoleGuess(node)).split('/').pop() || 'region';
+    return slugify(`${role}-${node && node.name ? node.name : node && node.type ? node.type : 'region'}`).slice(0, 40)
+      || `region-${String(node && node.id ? node.id : '').replace(/[^a-zA-Z0-9]/g, '')}`;
+  }
+
+  function buildOrderNote(node, spacing) {
+    const shell = regionShellFacts(node, spacing);
+    if (shell.display === 'flex' && shell.direction) {
+      return `Build as flex ${shell.direction}${shell.gap != null ? ` with gap ${shell.gap}px` : ''}${shell.padding ? ' plus padding' : ''}.`;
+    }
+    if (shell.display === 'grid') return 'Build as CSS grid/list; render repeated items from data instead of copying markup.';
+    if (shell.display === 'block') return 'Build as a plain block container; place children from their relative offsets.';
+    return 'Inspect this region before implementing it.';
+  }
+
+  function subRegionSummary(item, spacingByParentId) {
+    return clean({
+      key: regionKeyFor(item),
+      nodeId: item.id,
+      name: item.name,
+      role: compactRoleGuess(item),
+      nodeCount: countSerializedDescendants(item),
+      size: { width: roundNumber(item.bounds && item.bounds.width), height: roundNumber(item.bounds && item.bounds.height) },
+      shell: regionShellFacts(item, spacingByParentId.get(item.id))
+    });
+  }
+
+  function compilePageOutline(snapshot, input) {
+    const tree = snapshot.tree;
+    const aliases = snapshot.aliases;
+    const computed = snapshot.computedLayout || {};
+    const spacingByParentId = new Map((computed.spacingAnalysis || []).map(item => [item.parentNodeId, item]));
+    const maxRegions = clampInt(input && input.maxRegions, 2, 40, 16);
+    const subRegionLimit = clampInt(input && input.subRegionsPerRegion, 0, 8, 2);
+
+    const coverage = buildCoverageReport(snapshot);
+    const rootChildren = (Array.isArray(tree && tree.children) ? tree.children : [])
+      .filter(child => child && child.type !== 'TEXT');
+    const ordered = rootChildren.slice().sort((a, b) => {
+      const ay = a.bounds ? a.bounds.y || 0 : 0;
+      const by = b.bounds ? b.bounds.y || 0 : 0;
+      const ax = a.bounds ? a.bounds.x || 0 : 0;
+      const bx = b.bounds ? b.bounds.x || 0 : 0;
+      return ay - by || ax - bx;
+    });
+
+    const regions = [];
+    const buildOrder = [{
+      step: 0,
+      kind: 'shell',
+      nodeId: tree ? tree.id : snapshot.rootNode.id,
+      name: tree ? tree.name : snapshot.rootNode.name,
+      note: 'Implement the root container first: display, direction, gap, padding. Do not place children by absolute coordinates.'
+    }];
+
+    for (const child of ordered.slice(0, maxRegions)) {
+      const spacing = spacingByParentId.get(child.id);
+      const subRegions = subRegionLimit > 0
+        ? (Array.isArray(child.children) ? child.children : [])
+          .filter(item => item && item.type !== 'TEXT' && Array.isArray(item.children) && item.children.length)
+          .slice(0, subRegionLimit)
+          .map(item => subRegionSummary(item, spacingByParentId))
+        : [];
+      regions.push(clean({
+        key: regionKeyFor(child),
+        nodeId: child.id,
+        alias: aliases.get(child.id) || undefined,
+        name: child.name,
+        type: child.type,
+        role: compactRoleGuess(child),
+        semanticRole: regionRoleGuess(child),
+        size: { width: roundNumber(child.bounds && child.bounds.width), height: roundNumber(child.bounds && child.bounds.height) },
+        nodeCount: countSerializedDescendants(child),
+        textNodeCount: countSerializedByType(child, 'TEXT'),
+        shell: regionShellFacts(child, spacing),
+        subRegions: subRegions.length ? subRegions : undefined,
+        buildHint: buildOrderNote(child, spacing)
+      }));
+    }
+
+    regions.forEach((region, index) => {
+      buildOrder.push({
+        step: index + 1,
+        kind: 'region',
+        regionKey: region.key,
+        nodeId: region.nodeId,
+        name: region.name,
+        role: region.role,
+        note: region.buildHint
+      });
+    });
+
+    return clean({
+      kind: 'page-outline',
+      root: {
+        nodeId: snapshot.rootNode.id,
+        name: snapshot.rootNode.name,
+        type: snapshot.rootNode.type,
+        size: sizeText(tree ? tree.bounds : undefined),
+        selected: currentSelection().some(node => node.id === snapshot.rootNode.id)
+      },
+      coverage,
+      regionCount: regions.length,
+      regions,
+      buildOrder,
+      repeatedPatterns: (snapshot.patterns || []).slice(0, 12).map(pattern => clean({
+        key: pattern.key,
+        role: pattern.role,
+        count: pattern.count,
+        itemSize: pattern.itemSize,
+        layout: pattern.layout,
+        exampleNode: pattern.exampleNode,
+        guidance: pattern.guidance
+      })),
+      next: regions.length ? {
+        tool: 'get_region',
+        args: { nodeId: regions[0].nodeId },
+        reason: 'Fetch the first region in build order. Do not request the whole page at once.'
+      } : undefined,
+      warnings: Array.from(new Set([
+        ...(snapshot.warnings || []),
+        coverage.complete ? undefined : 'Outline coverage is incomplete; resolve coverage before implementing the page.'
+      ].filter(Boolean)))
+    });
+  }
+
+  function compileRegion(snapshot, input) {
+    const tree = snapshot.tree;
+    const aliases = snapshot.aliases;
+    const computed = snapshot.computedLayout || {};
+    const spacingByParentId = new Map((computed.spacingAnalysis || []).map(item => [item.parentNodeId, item]));
+    const spacing = spacingByParentId.get(snapshot.rootNode.id);
+    const includeChildren = input.includeChildren !== false;
+    const includeContract = input.includeContract !== false;
+    const maxChildren = clampInt(input.maxChildren, 1, 400, 80);
+    const coverage = buildCoverageReport(snapshot);
+    const subRegionNodes = (Array.isArray(tree && tree.children) ? tree.children : [])
+      .filter(item => item && item.type !== 'TEXT' && Array.isArray(item.children) && item.children.length);
+
+    const response = clean({
+      kind: 'region',
+      region: {
+        nodeId: snapshot.rootNode.id,
+        name: snapshot.rootNode.name,
+        type: snapshot.rootNode.type,
+        role: compactRoleGuess(snapshot.rootNode),
+        semanticRole: regionRoleGuess(snapshot.rootNode),
+        size: sizeText(tree ? tree.bounds : undefined)
+      },
+      shell: regionShellFacts(tree || snapshot.rootNode, spacing),
+      children: includeChildren ? describeRegionChildren(tree, aliases, maxChildren) : undefined,
+      subRegions: subRegionNodes.length ? subRegionNodes.slice(0, 16).map(item => subRegionSummary(item, spacingByParentId)) : undefined,
+      repeatedPatterns: (snapshot.patterns || []).slice(0, 10),
+      designFacts: clean({
+        colors: snapshot.colors && Array.isArray(snapshot.colors.rawColors) ? snapshot.colors.rawColors.slice(0, 12) : undefined,
+        typography: snapshot.typography && Array.isArray(snapshot.typography.styles) ? snapshot.typography.styles.slice(0, 12) : undefined
+      }),
+      contract: includeContract ? (snapshot.criticalDimensions || []).slice(0, 32).map(item => clean({
+        nodeId: item.nodeId,
+        name: item.name,
+        role: item.role,
+        size: item.size,
+        checks: item.checks,
+        source: item.source
+      })) : undefined,
+      coverage,
+      warnings: snapshot.warnings
+    });
+
+    if (!coverage.complete) {
+      response.coverageNote = 'This region was not fully read. Raise depth or scan its sub-regions before implementing.';
+    }
+
+    return response;
+  }
+
+  async function getPageOutline(input) {
+    const node = await resolveNodeOrSelection(input.nodeId);
+    const options = normalizeCodingContextOptions({
+      profile: 'balanced',
+      detail: 'balanced',
+      maxNodes: 3000,
+      maxTextChars: 1200,
+      includeAssets: true,
+      includeTokens: false,
+      includeVariables: false,
+      includeStyles: false,
+      includeComponentHints: false,
+      includeLayoutAnalysis: true,
+      includeRepeatedPatterns: true,
+      includeScreenshot: 'none',
+      includeCssSummary: false,
+      includeRawTree: false,
+      maxBytes: 1000000
+    });
+    options.treeDepth = clampInt(input.maxDepth, 1, 10, 6);
+    options.treeDetail = 'summary';
+    const performance = createPerformanceTracker('balanced', options.budgetMs);
+    const snapshot = await buildFrameSnapshot(node, options, performance, 'coding');
+    return compilePageOutline(snapshot, input || {});
+  }
+
+  async function getRegion(input) {
+    const node = await resolveNodeOrSelection(input.nodeId);
+    const options = normalizeCodingContextOptions({
+      profile: 'balanced',
+      detail: 'balanced',
+      maxNodes: 3000,
+      maxTextChars: clampInt(input.maxTextChars, 0, 8000, 2000),
+      includeAssets: true,
+      includeTokens: true,
+      includeVariables: false,
+      includeStyles: false,
+      includeComponentHints: false,
+      includeLayoutAnalysis: true,
+      includeRepeatedPatterns: true,
+      includeScreenshot: 'none',
+      includeCssSummary: false,
+      includeRawTree: false,
+      maxBytes: 1000000
+    });
+    options.treeDepth = clampInt(input.depth, 1, 12, 5);
+    options.treeDetail = 'full';
+    options.includeText = true;
+    const performance = createPerformanceTracker('balanced', options.budgetMs);
+    const snapshot = await buildFrameSnapshot(node, options, performance, 'coding');
+    return compileRegion(snapshot, input || {});
   }
 
   async function getCssContext(input) {
@@ -1926,6 +2341,7 @@
       counterAxisSpacing: hasAutoLayout ? roundNumber(safeGet(node, 'counterAxisSpacing')) : undefined,
       layoutAlign: safeGet(node, 'layoutAlign'),
       layoutGrow: roundNumber(safeGet(node, 'layoutGrow')),
+      layoutPositioning: safeGet(node, 'layoutPositioning'),
       constraints: toPlain(safeGet(node, 'constraints'), 3),
       clipsContent: safeGet(node, 'clipsContent') === true ? true : undefined,
       strokesIncludedInLayout: safeGet(node, 'strokesIncludedInLayout') === true ? true : undefined,

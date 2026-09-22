@@ -13,6 +13,8 @@ import {
   getCssContextSchema,
   getFileInfoSchema,
   getNodeTreeSchema,
+  getPageOutlineSchema,
+  getRegionSchema,
   getScreenshotSchema,
   getSelectionContextSchema,
   getStylesSchema,
@@ -298,5 +300,27 @@ export function registerTools(server: McpServer, session: PluginSession, config:
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
     async input => callPlugin(session, 'get_css_context', input, cssContextTimeoutMs(input))
+  );
+
+  server.registerTool(
+    'get_page_outline',
+    {
+      title: 'Get Pixso page outline',
+      description: 'STEP 1 of design-to-code. Returns the selected frame as an ordered list of build regions (header/sidebar/content/list/footer) with box-model-only facts, a build order, repeated-pattern hints, and a coverage report that explicitly lists anything that was NOT read. Start here instead of get_coding_context. Then implement region by region using get_region.',
+      inputSchema: getPageOutlineSchema,
+      annotations: { readOnlyHint: true, openWorldHint: false }
+    },
+    async input => callPlugin(session, 'get_page_outline', input, 90_000)
+  );
+
+  server.registerTool(
+    'get_region',
+    {
+      title: 'Get Pixso region detail',
+      description: 'STEP 2 of design-to-code. Returns ONE region in implementation detail: shell box model, per-child relative layout facts (main/cross axis sizing, flexGrow, alignSelf, offsetFromPrevious with a confidence tag), text/surface/asset facts, sub-regions, repeated patterns, and DOM verification checks. Call once per region listed by get_page_outline.',
+      inputSchema: getRegionSchema,
+      annotations: { readOnlyHint: true, openWorldHint: false }
+    },
+    async input => callPlugin(session, 'get_region', input, 90_000)
   );
 }
