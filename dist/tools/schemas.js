@@ -150,6 +150,8 @@ export const getRegionSchema = {
     depth: z.number().int().min(1).max(12).default(5).describe('Traversal depth inside the region. Truncation is reported in coverage.'),
     includeChildren: z.boolean().default(true).describe('Include per-child relative layout and content facts.'),
     includeContract: z.boolean().default(true).describe('Include browser/DOM verification checks for this region.'),
+    foldRepeats: z.boolean().default(true).describe('Collapse structurally identical sibling groups into one exemplar plus variants instead of repeating every node body.'),
+    minRepeat: z.number().int().min(2).max(50).default(3).describe('Minimum sibling count before a group is folded.'),
     maxChildren: z.number().int().min(1).max(400).default(80),
     maxTextChars: z.number().int().min(0).max(8000).default(2000)
 };

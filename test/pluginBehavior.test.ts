@@ -1274,3 +1274,79 @@ describe('Pixso region-first delivery', () => {
     expect(result.shell).toBeDefined();
   });
 });
+
+describe('Pixso batch 2: fidelity and size', () => {
+  it('folds structurally identical sibling groups into one exemplar plus variants', async () => {
+    const { callPlugin } = createPluginHarness();
+    const folded = await callPlugin('get_region', { nodeId: 'complex-export-frame' });
+
+    expect(folded.children.count).toBe(140);
+    expect(folded.children.foldedGroups).toHaveLength(2);
+    expect(folded.children.items).toHaveLength(2);
+
+    const rectangleGroup = folded.children.items.find(item => item.type === 'RECTANGLE');
+    expect(rectangleGroup).toBeDefined();
+    expect(rectangleGroup.repeated.count).toBe(64);
+    expect(rectangleGroup.repeated.coversNodeIds).toHaveLength(64);
+    expect(rectangleGroup.repeated.variants).toHaveLength(63);
+    expect(rectangleGroup.repeated.guidance).toContain('reusable component');
+
+    // Every folded member stays accounted for, so folding never hides nodes.
+    const covered = new Set(folded.children.items.flatMap(item => item.repeated.coversNodeIds));
+    expect(covered.size).toBe(80);
+  });
+
+  it('keeps every sibling body when folding is disabled, and folding is smaller', async () => {
+    const { callPlugin } = createPluginHarness();
+    const unfolded = await callPlugin('get_region', { nodeId: 'complex-export-frame', foldRepeats: false });
+    expect(unfolded.children.items).toHaveLength(80);
+    expect(unfolded.children.foldedGroups).toBeUndefined();
+
+    const folded = await callPlugin('get_region', { nodeId: 'complex-export-frame' });
+    expect(JSON.stringify(folded).length).toBeLessThan(JSON.stringify(unfolded).length);
+  });
+
+  it('counts depth truncation in get_coding_context coverage instead of hiding it', async () => {
+    const { callPlugin } = createPluginHarness();
+    const result = await callPlugin('get_coding_context', { detail: 'compact', maxNodes: 100, maxTextChars: 500 });
+
+    expect(result.coverage).toBeDefined();
+    expect(result.coverage.totalNodes).toBeGreaterThan(0);
+    expect(result.coverage.complete).toBe(false);
+    expect(result.coverage.depthLimited).toBeDefined();
+    expect(result.coverage.depthLimited.nodeCount).toBeGreaterThan(0);
+    expect(result.warnings.join(' ')).toContain('incomplete');
+  });
+
+  it('reports a complete coverage block for a fully scanned frame', async () => {
+    const { callPlugin } = createPluginHarness();
+    const result = await callPlugin('get_page_outline', { nodeId: 'complex-export-frame', maxDepth: 3 });
+    expect(result.coverage.complete).toBe(true);
+    expect(result.coverage.unresolvedNodes).toBe(0);
+    expect(result.coverage.percent).toBe(100);
+  });
+
+  it('summarizes fact confidence so callers know which facts to trust', async () => {
+    const { callPlugin } = createPluginHarness();
+
+    const outline = await callPlugin('get_page_outline', {});
+    expect(outline.factConfidence).toBeDefined();
+    expect(typeof outline.factConfidence.autoLayoutNodes).toBe('number');
+    expect(typeof outline.factConfidence.measuredOnlyNodes).toBe('number');
+    expect(outline.factConfidence.note).toBeTruthy();
+
+    const region = await callPlugin('get_region', { nodeId: 'screen' });
+    expect(region.factConfidence).toBeDefined();
+
+    const coding = await callPlugin('get_coding_context', { detail: 'compact' });
+    expect(coding.factConfidence).toBeDefined();
+  });
+
+  it('exposes layoutPositioning so children that escape auto-layout are visible', async () => {
+    const { callPlugin } = createPluginHarness();
+    const result = await callPlugin('get_region', { nodeId: 'screen', depth: 2 });
+    for (const item of result.children.items) {
+      expect(item.layout.confidence).toMatch(/^(fromAutoLayout|measured-bounds)$/);
+    }
+  });
+});

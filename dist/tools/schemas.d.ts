@@ -228,6 +228,8 @@ export declare const getRegionSchema: {
     depth: z.ZodDefault<z.ZodNumber>;
     includeChildren: z.ZodDefault<z.ZodBoolean>;
     includeContract: z.ZodDefault<z.ZodBoolean>;
+    foldRepeats: z.ZodDefault<z.ZodBoolean>;
+    minRepeat: z.ZodDefault<z.ZodNumber>;
     maxChildren: z.ZodDefault<z.ZodNumber>;
     maxTextChars: z.ZodDefault<z.ZodNumber>;
 };

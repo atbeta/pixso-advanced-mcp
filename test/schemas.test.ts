@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod/v4';
-import { findRelatedFramesSchema, getCodingContextSchema, getCssContextSchema, getExportPreviewSchema, getScreenshotSchema } from '../src/tools/schemas.js';
+import { findRelatedFramesSchema, getCodingContextSchema, getCssContextSchema, getExportPreviewSchema, getPageOutlineSchema, getRegionSchema, getScreenshotSchema } from '../src/tools/schemas.js';
 
 describe('tool schemas', () => {
   it('exposes screenshot mode for get_coding_context', () => {
@@ -56,5 +56,23 @@ describe('tool schemas', () => {
     expect(getScreenshotSchema.maxPixels).toBeDefined();
     expect(getScreenshotSchema.allowLargeExport).toBeDefined();
     expect(defaults.contentsOnly).toBe(true);
+  });
+
+  it('defaults the region-first tools to a bounded, build-ordered scan', () => {
+    const outline = z.object(getPageOutlineSchema).parse({});
+    expect(outline.maxDepth).toBe(6);
+    expect(outline.maxRegions).toBe(16);
+    expect(outline.subRegionsPerRegion).toBe(2);
+
+    const region = z.object(getRegionSchema).parse({ nodeId: '12:3' });
+    expect(region.depth).toBe(5);
+    expect(region.includeChildren).toBe(true);
+    expect(region.includeContract).toBe(true);
+    expect(region.foldRepeats).toBe(true);
+    expect(region.minRepeat).toBe(3);
+  });
+
+  it('requires a region node id so a whole page cannot be requested by accident', () => {
+    expect(() => z.object(getRegionSchema).parse({})).toThrow();
   });
 });

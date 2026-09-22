@@ -228,8 +228,9 @@
       detail: options.detail,
       maxNodes: options.maxNodes,
       nodeCount: ctx.count,
-      truncated: ctx.omitted > 0,
+      truncated: ctx.omitted > 0 || (ctx.depthOmitted || 0) > 0,
       omittedNodeCount: ctx.omitted,
+      omittedByDepthNodeCount: ctx.depthOmitted || 0,
       warnings: ctx.warnings,
       tree
     };
@@ -553,6 +554,7 @@
     const cssSummary = options.includeCssSummary === false ? undefined : buildCssSummary(snapshot);
     const nextRecommendedCalls = buildNextRecommendedCallsV4(snapshot, cssSummary);
     const implementationSpec = buildImplementationSpecV4(snapshot);
+    const coverage = buildCoverageReport(snapshot);
     const response = clean({
       version: CODING_CONTEXT_VERSION,
       screen: {
@@ -572,6 +574,8 @@
       extractionQuality: snapshot.quality,
       performance: snapshot.performance,
       budget: buildBudgetReport(snapshot, undefined),
+      coverage,
+      factConfidence: buildFactConfidence(snapshot),
       nodeIndex: snapshot.nodeIndex,
       regions: snapshot.semanticRegions,
       patterns: snapshot.patterns,
@@ -611,7 +615,10 @@
         'Hover, focus, pressed, disabled, loading, empty and error states are only known if present as frames/components in Pixso.',
         'Prefer project UI-kit/icons when available; exported Pixso assets are a fallback, not a mandatory implementation choice.'
       ],
-      warnings: snapshot.warnings
+      warnings: Array.from(new Set([
+        ...(snapshot.warnings || []),
+        coverage.complete ? undefined : 'This scan is incomplete: regions and patterns were derived from a partial tree. Check coverage before implementing.'
+      ].filter(Boolean)))
     });
     if (response.assets) {
       if (!Array.isArray(response.assets.exportQueue)) response.assets.exportQueue = [];
@@ -669,7 +676,11 @@
       const node = stack.pop();
       if (!node) continue;
       if (node.truncation) {
-        const omitted = node.truncation.omittedChildrenCount != null ? node.truncation.omittedChildrenCount : 1;
+        const omitted = node.truncation.omittedDescendants != null
+          ? node.truncation.omittedDescendants
+          : node.truncation.omittedChildrenCount != null
+            ? node.truncation.omittedChildrenCount
+            : 1;
         const entry = { nodeId: node.id, name: node.name, reason: node.truncation.reason, omitted };
         if (node.truncation.reason === 'maxNodes reached') maxNodes.push(entry);
         else if (node.truncation.reason === 'depth limit reached') depth.push(entry);
@@ -783,26 +794,145 @@
     });
   }
 
-  function describeRegionChildren(node, aliases, maxChildren) {
+  function buildFactConfidence(snapshot) {
+    const flatNodes = snapshot.flatNodes || [];
+    let autoLayoutNodes = 0;
+    let measuredOnlyNodes = 0;
+    for (const node of flatNodes) {
+      const layoutMode = node && node.layout ? node.layout.layoutMode : undefined;
+      const hasChildren = Array.isArray(node && node.children) && node.children.length > 0;
+      if (layoutMode && layoutMode !== 'NONE') autoLayoutNodes += 1;
+      else if (hasChildren) measuredOnlyNodes += 1;
+    }
+    let inferredContainers = 0;
+    for (const item of (snapshot.computedLayout && snapshot.computedLayout.spacingAnalysis) || []) {
+      if (typeof item.detectedPattern === 'string' && item.detectedPattern.indexOf('inferred') === 0) inferredContainers += 1;
+    }
+    const total = autoLayoutNodes + measuredOnlyNodes;
+    return clean({
+      autoLayoutNodes,
+      measuredOnlyNodes,
+      inferredContainers: inferredContainers || undefined,
+      autoLayoutShare: total ? roundNumber((autoLayoutNodes / total) * 100) : 100,
+      note: measuredOnlyNodes
+        ? 'Facts tagged "fromAutoLayout" can be translated into flex/grid directly. Facts tagged "measured-bounds" are derived from absolute pixel bounds and must be verified in the DOM before they are trusted.'
+        : 'Every container fact comes from Pixso auto-layout and can be translated directly.'
+    });
+  }
+
+  function serializedStructureSignature(node) {
+    if (!node) return 'unknown';
+    const bounds = node.bounds || {};
+    const childTypes = Array.isArray(node.children) ? node.children.map(child => child.type).sort().join(',') : '';
+    return [
+      node.type,
+      Math.round(bounds.width || 0),
+      Math.round(bounds.height || 0),
+      node.layout && node.layout.layoutMode ? node.layout.layoutMode : 'NONE',
+      Array.isArray(node.children) ? node.children.length : 0,
+      childTypes
+    ].join('|');
+  }
+
+  function serializedTextValues(node, max) {
+    const out = [];
+    const visit = item => {
+      if (!item || out.length >= max) return;
+      if (item.type === 'TEXT' && item.text) {
+        const value = item.text.characters || item.text.preview;
+        if (value) out.push(value);
+      }
+      if (Array.isArray(item.children)) for (const child of item.children) visit(child);
+    };
+    visit(node);
+    return out;
+  }
+
+  function describeRegionChildren(node, aliases, maxChildren, options) {
     const children = (Array.isArray(node && node.children) ? node.children : []).filter(child => child && child.bounds);
-    const items = [];
+    const opts = options || {};
+    const fold = opts.foldRepeats !== false;
+    const minRepeat = clampInt(opts.minRepeat, 2, 50, 3);
+    const entries = [];
     let previous = null;
     for (let index = 0; index < children.length && index < maxChildren; index += 1) {
       const child = children[index];
-      items.push(clean({
-        nodeId: child.id,
-        alias: aliases.get(child.id) || undefined,
-        name: child.name,
-        type: child.type,
-        role: compactRoleGuess(child),
-        isContainer: Boolean(Array.isArray(child.children) && child.children.length),
-        size: { width: roundNumber(child.bounds && child.bounds.width), height: roundNumber(child.bounds && child.bounds.height) },
-        layout: childRelativeFacts(child, node, index, previous),
-        content: childContentFacts(child)
-      }));
+      entries.push({
+        signature: serializedStructureSignature(child),
+        source: child,
+        item: clean({
+          nodeId: child.id,
+          alias: aliases.get(child.id) || undefined,
+          name: child.name,
+          type: child.type,
+          role: compactRoleGuess(child),
+          isContainer: Boolean(Array.isArray(child.children) && child.children.length),
+          size: { width: roundNumber(child.bounds && child.bounds.width), height: roundNumber(child.bounds && child.bounds.height) },
+          layout: childRelativeFacts(child, node, index, previous),
+          content: childContentFacts(child)
+        })
+      });
       previous = child;
     }
-    return clean({ count: children.length, shown: items.length, items });
+
+    if (!fold) {
+      const unfolded = entries.map(entry => entry.item);
+      return clean({ count: children.length, shown: unfolded.length, items: unfolded });
+    }
+
+    const bySignature = new Map();
+    for (const entry of entries) {
+      const bucket = bySignature.get(entry.signature);
+      if (bucket) bucket.push(entry);
+      else bySignature.set(entry.signature, [entry]);
+    }
+
+    const emitted = [];
+    const foldedNodeIds = [];
+    const handled = new Set();
+    for (const entry of entries) {
+      const signature = entry.signature;
+      if (handled.has(signature)) continue;
+      handled.add(signature);
+      const bucket = bySignature.get(signature) || [];
+      if (bucket.length < minRepeat) {
+        for (const member of bucket) emitted.push(member.item);
+        continue;
+      }
+      const exemplar = bucket[0];
+      const variants = bucket.slice(1).map(member => clean({
+        nodeId: member.item.nodeId,
+        alias: member.item.alias,
+        order: member.item.layout ? member.item.layout.order : undefined,
+        name: member.item.name,
+        text: serializedTextValues(member.source, 8)
+      }));
+      foldedNodeIds.push(exemplar.item.nodeId);
+      emitted.push(clean({
+        ...exemplar.item,
+        repeated: {
+          signature,
+          count: bucket.length,
+          coversNodeIds: bucket.map(member => member.item.nodeId),
+          variants,
+          guidance: `Repeats ${bucket.length} times with identical structure. Build ONE reusable component and render ${bucket.length} instances from data; only the listed text differs.`
+        }
+      }));
+    }
+
+    const orderIndex = new Map();
+    entries.forEach((entry, index) => orderIndex.set(entry.item.nodeId, index));
+    emitted.sort((a, b) => (orderIndex.get(a.nodeId) || 0) - (orderIndex.get(b.nodeId) || 0));
+
+    return clean({
+      count: children.length,
+      shown: emitted.length,
+      foldedGroups: foldedNodeIds.length ? foldedNodeIds : undefined,
+      note: foldedNodeIds.length
+        ? 'Repeated sibling groups were folded into one exemplar plus variants. Every folded node is still listed in repeated.coversNodeIds.'
+        : undefined,
+      items: emitted
+    });
   }
 
   function regionKeyFor(node) {
@@ -908,6 +1038,7 @@
         selected: currentSelection().some(node => node.id === snapshot.rootNode.id)
       },
       coverage,
+      factConfidence: buildFactConfidence(snapshot),
       regionCount: regions.length,
       regions,
       buildOrder,
@@ -956,7 +1087,9 @@
         size: sizeText(tree ? tree.bounds : undefined)
       },
       shell: regionShellFacts(tree || snapshot.rootNode, spacing),
-      children: includeChildren ? describeRegionChildren(tree, aliases, maxChildren) : undefined,
+      children: includeChildren
+        ? describeRegionChildren(tree, aliases, maxChildren, { foldRepeats: input.foldRepeats !== false, minRepeat: input.minRepeat })
+        : undefined,
       subRegions: subRegionNodes.length ? subRegionNodes.slice(0, 16).map(item => subRegionSummary(item, spacingByParentId)) : undefined,
       repeatedPatterns: (snapshot.patterns || []).slice(0, 10),
       designFacts: clean({
@@ -972,6 +1105,7 @@
         source: item.source
       })) : undefined,
       coverage,
+      factConfidence: buildFactConfidence(snapshot),
       warnings: snapshot.warnings
     });
 
@@ -2248,7 +2382,14 @@
       }
     } else if (childrenOf(node).length) {
       const visibleChildren = childrenOf(node).filter(child => options.includeHidden || safeGet(child, 'visible', true) !== false);
-      serialized.truncation = { childrenTruncated: true, omittedChildrenCount: visibleChildren.length, reason: 'depth limit reached' };
+      const omittedDescendants = countDescendants(node, () => true, 20000);
+      serialized.truncation = {
+        childrenTruncated: true,
+        omittedChildrenCount: visibleChildren.length,
+        omittedDescendants,
+        reason: 'depth limit reached'
+      };
+      if (ctx) ctx.depthOmitted = (ctx.depthOmitted || 0) + omittedDescendants;
     }
 
     return clean(serialized);
